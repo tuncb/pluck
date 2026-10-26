@@ -30,6 +30,12 @@ class Selector
             DestroyWindow(window_);
             throw std::runtime_error("Cannot prepare the selection overlay.");
         }
+        // A launcher can show the overlay without giving it keyboard focus.
+        if (!start_escape_hook())
+        {
+            DestroyWindow(window_);
+            throw std::runtime_error("Cannot prepare the Escape key.");
+        }
         ShowWindow(window_, SW_SHOW);
         SetForegroundWindow(window_);
         SetFocus(window_);
@@ -37,6 +43,7 @@ class Selector
     }
     ~Selector()
     {
+        stop_escape_hook();
         if (IsWindow(window_))
             DestroyWindow(window_);
     }
@@ -55,6 +62,8 @@ class Selector
   private:
     RECT bounds_{};
     HWND window_{};
+    HHOOK escape_hook_{};
+    inline static HWND escape_window_{};
     POINT start_{}, end_{};
     bool dragging_{}, closing_{}, copying_{};
     GlobalMemory pending_;
@@ -72,12 +81,30 @@ class Selector
         ScreenToClient(window_, &point);
         return point;
     }
+    bool start_escape_hook() noexcept
+    {
+        escape_window_ = window_;
+        escape_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_procedure, GetModuleHandleW(nullptr), 0);
+        if (!escape_hook_)
+            escape_window_ = nullptr;
+        return escape_hook_ != nullptr;
+    }
+    void stop_escape_hook() noexcept
+    {
+        escape_window_ = nullptr;
+        if (escape_hook_)
+        {
+            UnhookWindowsHookEx(escape_hook_);
+            escape_hook_ = nullptr;
+        }
+    }
     void finish() noexcept
     {
         if (closing_)
             return;
         closing_ = true;
         dragging_ = false;
+        stop_escape_hook();
         KillTimer(window_, 1);
         if (GetCapture() == window_)
             ReleaseCapture();
@@ -96,6 +123,8 @@ class Selector
             hint_ = L"Cannot copy. Drag to try again, or press Esc to cancel.";
             start_ = end_ = {};
             update_region();
+            if (!start_escape_hook())
+                throw std::runtime_error("Cannot prepare the Escape key.");
             ShowWindow(window_, SW_SHOW);
             SetForegroundWindow(window_);
             InvalidateRect(window_, nullptr, FALSE);
@@ -131,6 +160,8 @@ class Selector
     void capture_selection(RECT selected)
     {
         copying_ = true;
+        // Screen capture can block this thread. Remove the hook before that work.
+        stop_escape_hook();
         // Remove the complete overlay before reading screen pixels. DwmFlush waits
         // for the compositor to present the desktop without the dimming or border.
         ShowWindow(window_, SW_HIDE);
@@ -264,6 +295,19 @@ class Selector
             return 0;
         }
         return DefWindowProcW(window_, message, w, l);
+    }
+    static LRESULT CALLBACK keyboard_procedure(int code, WPARAM w, LPARAM l) noexcept
+    {
+        if (code == HC_ACTION && (w == WM_KEYDOWN || w == WM_SYSKEYDOWN) &&
+            reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_ESCAPE &&
+            escape_window_ && IsWindowVisible(escape_window_))
+        {
+            // Keep the hook short. Close through the normal window message loop,
+            // and do not pass the cancel key to the app behind the overlay.
+            if (PostMessageW(escape_window_, WM_CLOSE, 0, 0))
+                return 1;
+        }
+        return CallNextHookEx(nullptr, code, w, l);
     }
     static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM w, LPARAM l) noexcept
     {

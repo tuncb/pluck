@@ -72,8 +72,14 @@ class ClipboardBackup
     HWND owner_{};
     std::vector<std::pair<UINT, HANDLE>> data_;
 };
+unsigned fixture_escape_presses{};
 LRESULT CALLBACK pattern_proc(HWND window, UINT message, WPARAM w, LPARAM l)
 {
+    if (message == WM_KEYDOWN && w == VK_ESCAPE)
+    {
+        ++fixture_escape_presses;
+        return 0;
+    }
     if (message == WM_PAINT)
     {
         PAINTSTRUCT ps{};
@@ -97,7 +103,7 @@ struct Child
     PROCESS_INFORMATION process{};
     HWND window{};
     double startup_ms{};
-    explicit Child(const wchar_t* executable)
+    explicit Child(const wchar_t* executable, bool foreground = true)
     {
         std::wstring command = L"\"" + std::wstring(executable) + L"\"";
         STARTUPINFOW startup{sizeof(startup)};
@@ -112,7 +118,11 @@ struct Child
         {
             pump(1);
             window = FindWindowW(pluck::SelectorClass, nullptr);
-            if (window && (!IsWindowVisible(window) || GetForegroundWindow() != window))
+            DWORD owner{};
+            if (window)
+                GetWindowThreadProcessId(window, &owner);
+            if (window && (owner != process.dwProcessId || !IsWindowVisible(window) ||
+                           (foreground && GetForegroundWindow() != window)))
                 window = nullptr;
             if (GetTickCount64() >= until || WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0)
             {
@@ -120,7 +130,7 @@ struct Child
                 CloseHandle(process.hThread);
                 CloseHandle(process.hProcess);
                 process = {};
-                throw std::runtime_error("Pluck did not enter foreground selection mode.");
+                throw std::runtime_error("Pluck did not enter the required selection mode.");
             }
         }
         // A round trip waits for the first synchronous UpdateWindow to finish.
@@ -155,6 +165,18 @@ struct Child
         DWORD code{};
         GetExitCodeProcess(process.hProcess, &code);
         require(code == 0, "Pluck returned a failure exit code.");
+    }
+};
+class ForegroundLock
+{
+  public:
+    ForegroundLock()
+    {
+        require(LockSetForegroundWindow(LSFW_LOCK), "Cannot lock foreground focus for the test.");
+    }
+    ~ForegroundLock()
+    {
+        LockSetForegroundWindow(LSFW_UNLOCK);
     }
 };
 void mouse(POINT point, DWORD button)
@@ -321,6 +343,26 @@ int wmain(int count, wchar_t** arguments)
         // Use actual bounds if a desktop window manager moves the fixture.
         const POINT a{actual.left + 100, actual.top + 80};
         const POINT b{a.x + 100, a.y + 80};
+        {
+            marker(fixture);
+            const auto sequence = GetClipboardSequenceNumber();
+            SetForegroundWindow(fixture);
+            require(GetForegroundWindow() == fixture, "The test fixture does not have foreground focus.");
+            ForegroundLock lock;
+            Child child(arguments[1], false);
+            require(GetForegroundWindow() == fixture, "The launch test did not retain keyboard focus.");
+            const auto presses = fixture_escape_presses;
+            escape();
+            child.exited();
+            pump();
+            require(GetClipboardSequenceNumber() == sequence, "Escape before drawing changed the clipboard.");
+            require(fixture_escape_presses == presses, "The cancel key reached the app behind Pluck.");
+            require(GetForegroundWindow() == fixture, "Cancellation changed foreground focus.");
+            escape();
+            pump();
+            require(fixture_escape_presses == presses + 1, "Escape did not return to the previous app.");
+        }
+        std::puts("PASS: Escape before drawing exits without foreground focus and preserves the clipboard.");
         std::vector<double> times;
         for (int direction = 0; direction < 4; ++direction)
         {
@@ -343,7 +385,7 @@ int wmain(int count, wchar_t** arguments)
         }
         std::puts(
             "PASS: real mouse drags in all four directions; exact colors, crop, and clipboard after exit.");
-        for (int mode = 0; mode < 3; ++mode)
+        for (int mode = 0; mode < 4; ++mode)
         {
             marker(fixture);
             const auto sequence = GetClipboardSequenceNumber();
@@ -361,17 +403,19 @@ int wmain(int count, wchar_t** arguments)
                 mouse(a, MOUSEEVENTF_RIGHTDOWN);
                 mouse(a, MOUSEEVENTF_RIGHTUP);
             }
-            else
+            else if (mode == 2)
             {
                 mouse(a, MOUSEEVENTF_LEFTDOWN);
                 mouse(a, MOUSEEVENTF_LEFTUP);
                 require(IsWindow(child.window), "An empty selection closed Pluck.");
                 escape();
             }
+            else
+                escape();
             child.exited();
             require(GetClipboardSequenceNumber() == sequence, "Cancellation changed the clipboard.");
         }
-        std::puts("PASS: Escape during drag, right-click, and empty selections preserve the clipboard.");
+        std::puts("PASS: Escape before and during drag, right-click, and empty selections preserve the clipboard.");
         SetForegroundWindow(fixture);
         {
             Child child(arguments[1]);
