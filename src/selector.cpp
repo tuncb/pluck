@@ -59,7 +59,7 @@ class Selector
     bool dragging_{}, closing_{}, copying_{};
     GlobalMemory pending_;
     ULONGLONG copy_started_{};
-    const wchar_t* hint_ = L"Drag to copy an area   |   Esc or right-click to cancel";
+    const wchar_t* hint_{};
 
     RECT area() const noexcept
     {
@@ -158,28 +158,31 @@ class Selector
             InflateRect(&border, 1, 1);
             FrameRect(dc, &border, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
-        // Keep the hint on the display under the pointer, including negative-origin displays.
-        POINT point{};
-        GetCursorPos(&point);
-        MONITORINFO monitor{sizeof(monitor)};
-        GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY), &monitor);
-        const auto dpi = GetDpiForWindow(window_);
-        const int padding = MulDiv(16, dpi, 96);
-        RECT text{monitor.rcMonitor.left - bounds_.left + padding,
-                  monitor.rcMonitor.top - bounds_.top + padding,
-                  monitor.rcMonitor.right - bounds_.left - padding, 0};
-        text.bottom = text.top + MulDiv(32, dpi, 96);
-        const auto font = CreateFontW(-MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        const auto old_font = SelectObject(dc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
-        SetBkMode(dc, OPAQUE);
-        SetBkColor(dc, RGB(25, 25, 25));
-        SetTextColor(dc, RGB(255, 255, 255));
-        DrawTextW(dc, hint_, -1, &text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
-        SelectObject(dc, old_font);
-        if (font)
-            DeleteObject(font);
+        if (hint_)
+        {
+            // Keep the error hint on the display under the pointer.
+            POINT point{};
+            GetCursorPos(&point);
+            MONITORINFO monitor{sizeof(monitor)};
+            GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY), &monitor);
+            const auto dpi = GetDpiForWindow(window_);
+            const int padding = MulDiv(16, dpi, 96);
+            RECT text{monitor.rcMonitor.left - bounds_.left + padding,
+                      monitor.rcMonitor.top - bounds_.top + padding,
+                      monitor.rcMonitor.right - bounds_.left - padding, 0};
+            text.bottom = text.top + MulDiv(32, dpi, 96);
+            const auto font = CreateFontW(-MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                          CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            const auto old_font = SelectObject(dc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, RGB(25, 25, 25));
+            SetTextColor(dc, RGB(255, 255, 255));
+            DrawTextW(dc, hint_, -1, &text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+            SelectObject(dc, old_font);
+            if (font)
+                DeleteObject(font);
+        }
         EndPaint(window_, &ps);
     }
     LRESULT handle(UINT message, WPARAM w, LPARAM l)
