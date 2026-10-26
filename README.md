@@ -38,7 +38,7 @@ tools** component can supply CMake and Ninja.
 ```powershell
 ./scripts/bootstrap.ps1
 ./build.ps1 -Test -Publish
-./scripts/package.ps1 -ExpectedVersion 0.1.0
+./scripts/package.ps1 -ExpectedVersion 0.2.0
 ./tests/package-tests.ps1
 ./run.ps1
 ```

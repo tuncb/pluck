@@ -2,6 +2,11 @@ Pluck changelog
 
 Notable changes by release tag.
 
+v0.2.0
+
+- Stop the selection border and text from flashing when the pointer stays still.
+- Remove the instruction text during selection. Show text only if copying fails.
+
 v0.1.0
 
 - Open directly in rectangle selection mode.
