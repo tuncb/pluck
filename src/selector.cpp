@@ -217,7 +217,13 @@ class Selector
         case WM_MOUSEMOVE:
             if (dragging_)
             {
+                const auto previous = area();
                 end_ = cursor();
+                const auto selected = area();
+                // SetWindowRgn can cause another WM_MOUSEMOVE at the same position.
+                // Do not change the region or repaint until the selection changes.
+                if (EqualRect(&previous, &selected))
+                    return 0;
                 update_region();
             }
             InvalidateRect(window_, nullptr, FALSE);

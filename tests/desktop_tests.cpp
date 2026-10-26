@@ -177,6 +177,58 @@ void escape()
     input[1].ki.dwFlags = KEYEVENTF_KEYUP;
     require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send Escape.");
 }
+class WindowChanges
+{
+  public:
+    explicit WindowChanges(HWND window)
+    {
+        window_ = window;
+        count_ = 0;
+        DWORD process{};
+        const auto thread = GetWindowThreadProcessId(window, &process);
+        hook_ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
+                                changed, process, thread, WINEVENT_OUTOFCONTEXT);
+        require(hook_ != nullptr, "Cannot monitor selection window changes.");
+    }
+    ~WindowChanges()
+    {
+        UnhookWinEvent(hook_);
+        window_ = nullptr;
+    }
+    unsigned count() const noexcept
+    {
+        return count_;
+    }
+
+  private:
+    HWINEVENTHOOK hook_{};
+    inline static HWND window_{};
+    inline static unsigned count_{};
+    static void CALLBACK changed(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG, DWORD, DWORD)
+    {
+        if (window == window_ && object == OBJID_WINDOW)
+            ++count_;
+    }
+};
+void verify_held_selection(HWND window, POINT point, const WindowChanges& changes)
+{
+    // Let the last real pointer move and its window notifications finish first.
+    pump(150);
+    const auto before = changes.count();
+    require(before > 0, "No selection window changes were observed during the drag.");
+    POINT client = point;
+    ScreenToClient(window, &client);
+    const auto until = GetTickCount64() + 5000;
+    do
+    {
+        // Windows can send mouse-move messages without a change in pointer position.
+        require(PostMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(client.x, client.y)),
+                "Cannot send a stationary mouse-move message.");
+        pump(50);
+    } while (GetTickCount64() < until);
+    std::printf("Held selection: %u window changes in five seconds.\n", changes.count() - before);
+    require(changes.count() == before, "A stationary selection repeatedly changes its window region.");
+}
 void marker(HWND window)
 {
     constexpr wchar_t text[] = L"Pluck cancellation test";
@@ -275,12 +327,16 @@ int wmain(int count, wchar_t** arguments)
             SetForegroundWindow(fixture);
             Child child(arguments[1]);
             times.push_back(child.startup_ms);
+            WindowChanges changes(child.window);
             const POINT from{direction & 1 ? b.x : a.x, direction & 2 ? b.y : a.y};
             const POINT to{direction & 1 ? a.x : b.x, direction & 2 ? a.y : b.y};
             mouse(from, MOUSEEVENTF_LEFTDOWN);
             mouse(to, 0);
             if (direction == 0)
+            {
+                verify_held_selection(child.window, to, changes);
                 save_view(arguments[2]);
+            }
             mouse(to, MOUSEEVENTF_LEFTUP);
             child.exited();
             verify_image(fixture);
@@ -398,6 +454,10 @@ int wmain(int count, wchar_t** arguments)
     }
     catch (const std::exception& error)
     {
+        INPUT release{};
+        release.type = INPUT_MOUSE;
+        release.mi.dwFlags = MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP;
+        SendInput(1, &release, sizeof(release));
         CloseClipboard();
         std::fprintf(stderr, "FAIL: %s\n", error.what());
         result = 1;
