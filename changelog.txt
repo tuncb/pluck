@@ -1,0 +1,11 @@
+Pluck changelog
+
+Notable changes by release tag.
+
+v0.1.0
+
+- Open directly in rectangle selection mode.
+- Drag an area on the live desktop and release to copy its pixels to the clipboard.
+- Exit after copying. Press Escape or right-click to cancel without changing the clipboard.
+- Capture across connected displays in physical pixels.
+- Ship one portable native Windows x64 executable.

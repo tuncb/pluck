@@ -1,0 +1,74 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Application version for a release build.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check native build tools
+        run: ./scripts/bootstrap.ps1
+
+      - name: Build, test, and publish
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: ./build.ps1 -Test -Publish -Version $env:RELEASE_VERSION
+
+      - name: Verify and package application
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: ./scripts/package.ps1 -ExpectedVersion $env:RELEASE_VERSION
+
+      - name: Test package failure checks
+        run: ./tests/package-tests.ps1
+
+      - name: Test with AddressSanitizer
+        run: ./build.ps1 -Configuration RelWithDebInfo -Sanitize -Test
+
+      - name: Upload application package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pluck-windows-x64
+          path: |
+            artifacts/packages/pluck-windows-x64.zip
+            artifacts/packages/pluck-windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-results-windows-x64
+          path: |
+            artifacts/test-results/**
+            artifacts/packages/package-verification.json
+            build/*/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 14

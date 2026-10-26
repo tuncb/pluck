@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and changelog
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag || ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo '::error::Select a tag in the form vX.Y.Z.'
+            exit 1
+          fi
+          version="$(tr -d '\r\n' < VERSION)"
+          if [[ "${RELEASE_TAG#v}" != "$version" ]]; then
+            echo '::error::The release tag must match VERSION.'
+            exit 1
+          fi
+          if ! tr -d '\r' < changelog.txt | grep -Fxq "$RELEASE_TAG"; then
+            echo '::error::The release has no changelog entry.'
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build tagged commit
+    needs: validate
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      version: ${{ needs.validate.outputs.version }}
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged release notes
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download verified package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: pluck-windows-x64
+          path: release-assets
+
+      - name: Verify package checksum
+        working-directory: release-assets
+        run: sha256sum --check pluck-windows-x64.zip.sha256
+
+      - name: Publish release in this repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          notes="$RUNNER_TEMP/pluck-release-notes.md"
+          cat > "$notes" <<EOF
+          Download [Pluck for Windows x64](https://github.com/$GH_REPO/releases/download/$RELEASE_TAG/pluck-windows-x64.zip).
+
+          Extract the ZIP and run **Pluck.exe**. Drag a rectangle, then release to copy the image. Press Escape or right-click to cancel.
+
+          Portable native executable. No installer, .NET, or separate Visual C++ runtime is required.
+
+          ## Changes
+          EOF
+          awk -v tag="$RELEASE_TAG" '
+            { sub(/\r$/, "") }
+            $0 == tag { found = 1; next }
+            found && /^v[0-9]+\.[0-9]+\.[0-9]+$/ { exit }
+            found { print }
+          ' changelog.txt >> "$notes"
+          assets=(release-assets/pluck-windows-x64.zip release-assets/pluck-windows-x64.zip.sha256)
+          # A rerun may complete a draft, but must not replace a published binary.
+          if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            if ! jq -e '.isDraft == true' "$RUNNER_TEMP/release.json" >/dev/null; then
+              echo '::error::This release is already published. Use a new version for changed binaries.'
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --draft --title "$RELEASE_TAG" --notes-file "$notes"
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest

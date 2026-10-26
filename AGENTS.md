@@ -1,0 +1,8 @@
+- Use `D:\.worktree` for Git worktrees on Windows.
+- Follow the native C++20, Win32, CMake, and PowerShell conventions of `D:\yoink`.
+- Keep startup small. The app opens directly in rectangle selection mode, copies the image, and exits.
+- Use the ASD-STE100 standard for writing.
+- Stop an existing Pluck process from this checkout before rebuilding or running desktop tests.
+- Run `./build.ps1 -Test -Publish` and `./tests/package-tests.ps1` for release changes.
+- Run `./scripts/smoke-test.ps1` on an unlocked desktop for capture or selection changes.
+- Use `.agents/skills/update-version/SKILL.md` for version updates and releases.
