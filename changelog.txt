@@ -2,6 +2,10 @@ Pluck changelog
 
 Notable changes by release tag.
 
+v0.2.1
+
+- Make Escape cancel and quit before drawing when a keyboard shortcut or launcher does not give Pluck keyboard focus.
+
 v0.2.0
 
 - Stop the selection border and text from flashing when the pointer stays still.
