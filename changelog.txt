@@ -2,6 +2,14 @@ Pluck changelog
 
 Notable changes by release tag.
 
+v0.3.0
+
+- Add a Settings window. Press F2 during capture or run Pluck.exe --settings to open it.
+- Show a small F2 hint before selection. Hide the hint when you start to draw a rectangle.
+- Install Pluck for the current Windows user, create capture and Settings shortcuts, and uninstall from Settings.
+- Check for updates in Settings. Verify each download before replacing the installed application.
+- Add a Pluck icon and use its colors in Settings.
+
 v0.2.2
 
 - Capture the desktop before selection starts to keep open menus in the copied image.
