@@ -2,6 +2,11 @@ Pluck changelog
 
 Notable changes by release tag.
 
+v0.2.2
+
+- Capture the desktop before selection starts to keep open menus in the copied image.
+- Keep the same captured image when you try again after a clipboard error.
+
 v0.2.1
 
 - Make Escape cancel and quit before drawing when a keyboard shortcut or launcher does not give Pluck keyboard focus.
