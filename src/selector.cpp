@@ -37,6 +37,7 @@ class Selector
         wc.lpfnWndProc = procedure;
         wc.hInstance = instance;
         wc.lpszClassName = SelectorClass;
+        wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
         wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
         if (!RegisterClassW(&wc))
             throw std::runtime_error("Cannot register the selection window.");

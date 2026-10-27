@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>Pluck - Mint motion</title>
+  <defs>
+    <linearGradient id="mint" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#77F4D5"/>
+      <stop offset="1" stop-color="#12A997"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#37B8AD"/>
+      <stop offset="1" stop-color="#168F91"/>
+    </linearGradient>
+  </defs>
+  <path d="M21 23H8V37M8 44V57H22M33 57H44V46" fill="none"
+        stroke="url(#teal)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <g transform="rotate(-12 42 22)">
+    <rect x="26" y="6" width="32" height="32" rx="5" fill="url(#mint)"/>
+    <path d="M32 19V13H38" fill="none" stroke="#D0FFF1" stroke-width="3"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

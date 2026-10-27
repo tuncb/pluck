@@ -73,6 +73,10 @@ work on the normal startup path. The selector uses physical pixel coordinates
 and a Per-Monitor V2 DPI manifest. The clipboard receives a complete 24-bit
 `CF_DIB`, so the image remains available after the process exits.
 
+The icon source is **assets/Pluck.svg**. Run **scripts/update-icon.ps1** to generate
+**assets/Pluck.ico** after an icon change. This script needs ImageMagick with SVG
+support. Normal builds use the ICO file and do not need ImageMagick.
+
 `VERSION` is the version source for CMake, executable resources, and packaging.
 Pushes and pull requests run release builds, core tests, package failure checks,
 and AddressSanitizer tests. A matching `vX.Y.Z` tag runs those checks again and

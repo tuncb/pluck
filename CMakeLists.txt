@@ -31,8 +31,11 @@ target_compile_definitions(pluck_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEA
     _WIN32_WINNT=0x0A00 PLUCK_VERSION="${PROJECT_VERSION}")
 target_compile_options(pluck_core PUBLIC /utf-8 /EHsc /permissive- /W4 /WX /Zc:inline)
 target_link_libraries(pluck_core PUBLIC user32 gdi32)
+set(PLUCK_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/Pluck.ico")
 configure_file(src/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" @ONLY)
 configure_file(src/app.manifest.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest" @ONLY)
+set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
+    PROPERTIES OBJECT_DEPENDS "${PLUCK_ICON}")
 add_executable(Pluck WIN32 src/main.cpp src/selector.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
