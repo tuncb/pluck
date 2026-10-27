@@ -1,5 +1,4 @@
 #include "selector.h"
-#include <dwmapi.h>
 #include <stdexcept>
 #include <string>
 
@@ -10,8 +9,30 @@ namespace
 class Selector
 {
   public:
-    explicit Selector(HINSTANCE instance) : bounds_(desktop_bounds())
+    explicit Selector(HINSTANCE instance)
+        : bounds_(desktop_bounds()), image_(capture_desktop(bounds_)),
+          dimmed_(image_->width(), image_->height())
     {
+        // Save the desktop before a selection window can close menus or take focus.
+        // End a native menu's input loop before it can consume the first drag or
+        // release mouse capture after the selector has started that drag.
+        GUITHREADINFO foreground{sizeof(foreground)};
+        if (GetGUIThreadInfo(0, &foreground) && (foreground.flags & GUI_INMENUMODE) &&
+            foreground.hwndMenuOwner)
+        {
+            DWORD_PTR ignored{};
+            SendMessageTimeoutW(foreground.hwndMenuOwner, WM_CANCELMODE, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                                200, &ignored);
+        }
+        // Keep a dimmed copy so mouse moves need only bitmap copies during paint.
+        for (int i = 0; i < image_->width() * image_->height(); ++i)
+        {
+            const auto pixel = image_->pixels()[i];
+            const auto red = ((pixel >> 16) & 255) * 135 / 255;
+            const auto green = ((pixel >> 8) & 255) * 135 / 255;
+            const auto blue = (pixel & 255) * 135 / 255;
+            dimmed_.pixels()[i] = (red << 16) | (green << 8) | blue;
+        }
         WNDCLASSW wc{};
         wc.lpfnWndProc = procedure;
         wc.hInstance = instance;
@@ -19,17 +40,11 @@ class Selector
         wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
         if (!RegisterClassW(&wc))
             throw std::runtime_error("Cannot register the selection window.");
-        window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, SelectorClass,
-                                  L"Pluck - select area", WS_POPUP, bounds_.left, bounds_.top,
-                                  bounds_.right - bounds_.left, bounds_.bottom - bounds_.top, nullptr,
-                                  nullptr, instance, this);
+        window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SelectorClass, L"Pluck - select area",
+                                  WS_POPUP, bounds_.left, bounds_.top, bounds_.right - bounds_.left,
+                                  bounds_.bottom - bounds_.top, nullptr, nullptr, instance, this);
         if (!window_)
             throw std::runtime_error("Cannot open the selection window.");
-        if (!SetLayeredWindowAttributes(window_, 0, 120, LWA_ALPHA))
-        {
-            DestroyWindow(window_);
-            throw std::runtime_error("Cannot prepare the selection overlay.");
-        }
         // A launcher can show the overlay without giving it keyboard focus.
         if (!start_escape_hook())
         {
@@ -61,6 +76,8 @@ class Selector
 
   private:
     RECT bounds_{};
+    std::unique_ptr<Bitmap> image_;
+    Bitmap dimmed_;
     HWND window_{};
     HHOOK escape_hook_{};
     inline static HWND escape_window_{};
@@ -122,7 +139,6 @@ class Selector
             copying_ = false;
             hint_ = L"Cannot copy. Drag to try again, or press Esc to cancel.";
             start_ = end_ = {};
-            update_region();
             if (!start_escape_hook())
                 throw std::runtime_error("Cannot prepare the Escape key.");
             ShowWindow(window_, SW_SHOW);
@@ -130,47 +146,21 @@ class Selector
             InvalidateRect(window_, nullptr, FALSE);
         }
     }
-    void update_region()
+    void redraw_selection(RECT previous)
     {
         const auto selected = area();
-        if (!has_area(selected))
-        {
-            SetWindowRgn(window_, nullptr, TRUE);
-            return;
-        }
-        const auto full = CreateRectRgn(0, 0, bounds_.right - bounds_.left, bounds_.bottom - bounds_.top);
-        const auto hole = CreateRectRgn(selected.left, selected.top, selected.right, selected.bottom);
-        if (!full || !hole)
-        {
-            if (full)
-                DeleteObject(full);
-            if (hole)
-                DeleteObject(hole);
-            throw std::runtime_error("Cannot draw the selected area.");
-        }
-        const auto combined = CombineRgn(full, full, hole, RGN_DIFF);
-        DeleteObject(hole);
-        if (combined == ERROR || !SetWindowRgn(window_, full, TRUE))
-        {
-            DeleteObject(full);
-            throw std::runtime_error("Cannot update the selected area.");
-        }
-        // Windows owns full after SetWindowRgn succeeds. The hole shows live pixels.
+        RECT changed{};
+        UnionRect(&changed, &previous, &selected);
+        InflateRect(&changed, 1, 1);
+        InvalidateRect(window_, &changed, FALSE);
     }
     void capture_selection(RECT selected)
     {
         copying_ = true;
-        // Screen capture can block this thread. Remove the hook before that work.
+        // Image conversion can block this thread. Remove the hook before that work.
         stop_escape_hook();
-        // Remove the complete overlay before reading screen pixels. DwmFlush waits
-        // for the compositor to present the desktop without the dimming or border.
         ShowWindow(window_, SW_HIDE);
-        if (FAILED(DwmFlush()))
-            throw std::runtime_error("Cannot wait for the desktop to redraw.");
-        const RECT screen{selected.left + bounds_.left, selected.top + bounds_.top,
-                          selected.right + bounds_.left, selected.bottom + bounds_.top};
-        const auto image = capture_desktop(screen);
-        pending_ = make_clipboard_dib(*image, {0, 0, image->width(), image->height()});
+        pending_ = make_clipboard_dib(*image_, selected);
         copy_started_ = GetTickCount64();
         // Retry without blocking the UI or replacing a clipboard held by another app.
         if (!SetTimer(window_, 1, 25, nullptr))
@@ -182,9 +172,18 @@ class Selector
         PAINTSTRUCT ps{};
         const auto dc = BeginPaint(window_, &ps);
         const auto selected = area();
-        FillRect(dc, &ps.rcPaint, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        // Paint each part once. The selected pixels come from the original image.
+        // The window stays opaque, including inside the selection rectangle.
+        const auto saved = SaveDC(dc);
+        if (has_area(selected))
+            ExcludeClipRect(dc, selected.left, selected.top, selected.right, selected.bottom);
+        BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
+               ps.rcPaint.bottom - ps.rcPaint.top, dimmed_.dc(), ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        RestoreDC(dc, saved);
         if (has_area(selected))
         {
+            BitBlt(dc, selected.left, selected.top, selected.right - selected.left,
+                   selected.bottom - selected.top, image_->dc(), selected.left, selected.top, SRCCOPY);
             RECT border = selected;
             InflateRect(&border, 1, 1);
             FrameRect(dc, &border, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
@@ -241,11 +240,11 @@ class Selector
         case WM_LBUTTONDOWN:
             if (!copying_)
             {
+                const auto previous = area();
                 dragging_ = true;
                 start_ = end_ = cursor();
                 SetCapture(window_);
-                update_region();
-                InvalidateRect(window_, nullptr, FALSE);
+                redraw_selection(previous);
             }
             return 0;
         case WM_MOUSEMOVE:
@@ -254,13 +253,11 @@ class Selector
                 const auto previous = area();
                 end_ = cursor();
                 const auto selected = area();
-                // SetWindowRgn can cause another WM_MOUSEMOVE at the same position.
-                // Do not change the region or repaint until the selection changes.
+                // Windows can send mouse moves at the same pointer position.
                 if (EqualRect(&previous, &selected))
                     return 0;
-                update_region();
+                redraw_selection(previous);
             }
-            InvalidateRect(window_, nullptr, FALSE);
             return 0;
         case WM_LBUTTONUP:
             if (dragging_)
@@ -278,12 +275,12 @@ class Selector
         case WM_CANCELMODE:
             if (dragging_)
             {
+                const auto previous = area();
                 dragging_ = false;
                 end_ = start_;
-                update_region();
+                redraw_selection(previous);
                 if (GetCapture() == window_)
                     ReleaseCapture();
-                InvalidateRect(window_, nullptr, FALSE);
             }
             return 0;
         case WM_TIMER:
@@ -299,8 +296,8 @@ class Selector
     static LRESULT CALLBACK keyboard_procedure(int code, WPARAM w, LPARAM l) noexcept
     {
         if (code == HC_ACTION && (w == WM_KEYDOWN || w == WM_SYSKEYDOWN) &&
-            reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_ESCAPE &&
-            escape_window_ && IsWindowVisible(escape_window_))
+            reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_ESCAPE && escape_window_ &&
+            IsWindowVisible(escape_window_))
         {
             // Keep the hook short. Close through the normal window message loop,
             // and do not pass the cancel key to the app behind the overlay.

@@ -18,16 +18,17 @@ run **Pluck.exe**. The package contains only this executable. It needs no .NET o
 separate Visual C++ runtime installation.
 
 The target is Windows 10 version 1703 or later, or Windows 11, on x64.
-The desktop stays live while you select. Selection can span displays, including
+Pluck saves an image of the desktop when it opens. This keeps open menus in the
+image while you select. Selection can span displays, including
 displays with negative coordinates. Pixels are not resized. The mouse pointer,
 selection border, and dimming are not in the copied image.
 
 Capture uses the Windows GDI desktop image. Output is an SDR bitmap; HDR color
-accuracy is not guaranteed. The image is captured when you release the mouse.
+accuracy is not guaranteed. The image is captured before selection starts.
 Protected content and secure desktops cannot be
 captured. A display-layout change or loss of foreground focus cancels selection.
 If another app holds the clipboard, Pluck retries briefly. If copying still
-fails, drag again or cancel.
+fails, drag again on the same saved image or cancel.
 
 ## Build and test
 
@@ -56,18 +57,19 @@ Run these checks on an unlocked Windows desktop:
 
 The desktop test briefly uses the mouse and keyboard. It saves and restores
 clipboard formats that Windows can duplicate. It checks real drag input, exact
-crop pixels, cancellation, clipboard contention, and image availability after
-exit. It records startup times and a selection screenshot under **artifacts/smoke**.
+crop pixels, open popup menus, cancellation, clipboard contention, and image
+availability after exit. It records startup times and selection screenshots under
+**artifacts/smoke**.
 Core and package tests run in CI; desktop tests need a local interactive session.
 
 ## Design and releases
 
 Pluck follows Yoink's C++20, Win32, CMake, static MSVC runtime, and PowerShell
-conventions. A native translucent overlay opens before any screenshot is taken.
-After selection, the overlay is hidden, the desktop compositor is synchronized,
-and GDI captures only the selected rectangle. There is no video pipeline, COM
-initialization, dependency extraction, or disk/network work on the normal startup
-path. The selector uses physical pixel coordinates
+conventions. GDI saves the desktop before the selection window opens or takes
+focus. The window shows this saved image, dimmed outside the selected rectangle.
+After selection, Pluck copies the selected pixels from the saved image. There is
+no video pipeline, COM initialization, dependency extraction, or disk/network
+work on the normal startup path. The selector uses physical pixel coordinates
 and a Per-Monitor V2 DPI manifest. The clipboard receives a complete 24-bit
 `CF_DIB`, so the image remains available after the process exits.
 

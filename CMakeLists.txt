@@ -36,7 +36,7 @@ configure_file(src/app.manifest.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.ma
 add_executable(Pluck WIN32 src/main.cpp src/selector.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
-target_link_libraries(Pluck PRIVATE pluck_core dwmapi)
+target_link_libraries(Pluck PRIVATE pluck_core)
 if(NOT PLUCK_SANITIZE)
     set_property(TARGET pluck_core Pluck PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()

@@ -2,10 +2,12 @@
 #include "selector.h"
 #include <dwmapi.h>
 #include <ole2.h>
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -179,6 +181,76 @@ class ForegroundLock
         LockSetForegroundWindow(LSFW_UNLOCK);
     }
 };
+class PopupMenu
+{
+  public:
+    explicit PopupMenu(POINT point) : thread_([this, point] { run(point); }) {}
+    ~PopupMenu()
+    {
+        if (!finished_)
+            PostThreadMessageW(GetThreadId(thread_.native_handle()), WM_QUIT, 0, 0);
+        thread_.join();
+    }
+    RECT bounds()
+    {
+        const auto until = GetTickCount64() + 5000;
+        while (!menu_window_ || !IsWindowVisible(menu_window_))
+        {
+            require(!finished_ && GetTickCount64() < until, "Cannot open the popup menu fixture.");
+            pump(10);
+        }
+        pump(100);
+        DwmFlush();
+        RECT rect{};
+        require(GetWindowRect(menu_window_, &rect), "Cannot locate the popup menu.");
+        return rect;
+    }
+    bool closed() const
+    {
+        return finished_;
+    }
+
+  private:
+    std::atomic<HWND> menu_window_{};
+    std::atomic<bool> finished_{};
+    std::thread thread_;
+    static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM w, LPARAM l)
+    {
+        if (message == WM_NCCREATE)
+            SetWindowLongPtrW(
+                window, GWLP_USERDATA,
+                reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));
+        auto* self = reinterpret_cast<PopupMenu*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (self && message == WM_ENTERIDLE && w == MSGF_MENU)
+            self->menu_window_ = reinterpret_cast<HWND>(l);
+        return DefWindowProcW(window, message, w, l);
+    }
+    void run(POINT point)
+    {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = procedure;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"Pluck.Test.Menu";
+        RegisterClassW(&wc);
+        const auto owner = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"Pluck menu test", WS_POPUP,
+                                           point.x, point.y, 1, 1, nullptr, nullptr, wc.hInstance, this);
+        const auto menu = CreatePopupMenu();
+        if (owner && menu && AppendMenuW(menu, MF_STRING, 1, L"Open test menu") &&
+            AppendMenuW(menu, MF_STRING, 2, L"Keep these pixels") &&
+            AppendMenuW(menu, MF_STRING, 3, L"Exit test menu"))
+        {
+            ShowWindow(owner, SW_SHOW);
+            SetForegroundWindow(owner);
+            TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION, point.x, point.y, 0,
+                           owner, nullptr);
+        }
+        if (menu)
+            DestroyMenu(menu);
+        if (owner)
+            DestroyWindow(owner);
+        finished_ = true;
+    }
+};
 void mouse(POINT point, DWORD button)
 {
     require(SetCursorPos(point.x, point.y), "Cannot move the test pointer.");
@@ -208,8 +280,8 @@ class WindowChanges
         count_ = 0;
         DWORD process{};
         const auto thread = GetWindowThreadProcessId(window, &process);
-        hook_ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
-                                changed, process, thread, WINEVENT_OUTOFCONTEXT);
+        hook_ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, changed,
+                                process, thread, WINEVENT_OUTOFCONTEXT);
         require(hook_ != nullptr, "Cannot monitor selection window changes.");
     }
     ~WindowChanges()
@@ -237,7 +309,6 @@ void verify_held_selection(HWND window, POINT point, const WindowChanges& change
     // Let the last real pointer move and its window notifications finish first.
     pump(150);
     const auto before = changes.count();
-    require(before > 0, "No selection window changes were observed during the drag.");
     POINT client = point;
     ScreenToClient(window, &client);
     const auto until = GetTickCount64() + 5000;
@@ -286,21 +357,51 @@ void verify_image(HWND owner)
     GlobalUnlock(memory);
     CloseClipboard();
 }
-void save_view(const wchar_t* directory)
+bool menu_pixels_match(const unsigned char* actual, const unsigned char* expected, size_t bytes)
 {
-    const auto bounds = pluck::desktop_bounds();
-    const auto image = pluck::capture_desktop(bounds);
-    auto data = pluck::make_clipboard_dib(*image, {0, 0, image->width(), image->height()});
+    // Separate desktop captures can round antialiased menu edges by one level.
+    for (size_t i = 0; i < bytes; ++i)
+        if (actual[i] + 1 < expected[i] || expected[i] + 1 < actual[i])
+            return false;
+    return true;
+}
+void verify_popup(HWND owner, const pluck::Bitmap& expected)
+{
+    auto expected_dib = pluck::make_clipboard_dib(expected, {0, 0, expected.width(), expected.height()});
+    open_clipboard(owner);
+    const auto memory = GetClipboardData(CF_DIB);
+    require(memory != nullptr, "No popup menu image remains on the clipboard.");
+    const auto* actual = static_cast<const BITMAPINFOHEADER*>(GlobalLock(memory));
+    const auto* wanted = static_cast<const BITMAPINFOHEADER*>(GlobalLock(expected_dib.get()));
+    require(actual && wanted, "Cannot read the popup menu image.");
+    const bool matches =
+        actual->biWidth == wanted->biWidth && actual->biHeight == wanted->biHeight &&
+        actual->biBitCount == wanted->biBitCount && actual->biSizeImage == wanted->biSizeImage &&
+        menu_pixels_match(reinterpret_cast<const unsigned char*>(actual + 1),
+                          reinterpret_cast<const unsigned char*>(wanted + 1), wanted->biSizeImage);
+    GlobalUnlock(expected_dib.get());
+    GlobalUnlock(memory);
+    CloseClipboard();
+    require(matches, "The copied image lost or changed the open popup menu.");
+}
+void save_bitmap(const pluck::Bitmap& image, const std::wstring& path)
+{
+    auto data = pluck::make_clipboard_dib(image, {0, 0, image.width(), image.height()});
     const auto* dib = static_cast<BITMAPINFOHEADER*>(GlobalLock(data.get()));
     BITMAPFILEHEADER header{};
     header.bfType = 0x4d42;
     header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
     header.bfSize = header.bfOffBits + dib->biSizeImage;
-    std::ofstream file(std::wstring(directory) + L"/selection.bmp", std::ios::binary);
+    std::ofstream file(path, std::ios::binary);
     file.write(reinterpret_cast<const char*>(&header), sizeof(header));
     file.write(reinterpret_cast<const char*>(dib), sizeof(BITMAPINFOHEADER) + dib->biSizeImage);
     GlobalUnlock(data.get());
     require(file.good(), "Cannot save the selection screenshot.");
+}
+void save_view(const wchar_t* directory)
+{
+    const auto image = pluck::capture_desktop(pluck::desktop_bounds());
+    save_bitmap(*image, std::wstring(directory) + L"/selection.bmp");
 }
 BOOL CALLBACK collect_monitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter)
 {
@@ -343,6 +444,42 @@ int wmain(int count, wchar_t** arguments)
         // Use actual bounds if a desktop window manager moves the fixture.
         const POINT a{actual.left + 100, actual.top + 80};
         const POINT b{a.x + 100, a.y + 80};
+        for (int retry = 0; retry < 2; ++retry)
+        {
+            std::printf("Checking popup menu capture%s.\n", retry ? " after a clipboard retry" : "");
+            SetForegroundWindow(fixture);
+            mouse({actual.left + 10, actual.top + 10}, 0);
+            PopupMenu menu({a.x, a.y});
+            const auto rect = menu.bounds();
+            const auto expected = pluck::capture_desktop(rect);
+            // Windows can refuse foreground focus while another app has an open menu.
+            Child child(arguments[1], false);
+            if (retry)
+                open_clipboard(fixture);
+            mouse({rect.right, rect.top}, MOUSEEVENTF_LEFTDOWN);
+            mouse({rect.left, rect.bottom}, 0);
+            require(menu.closed(), "The selection click did not dismiss the popup menu fixture.");
+            DwmFlush();
+            const auto view = pluck::capture_desktop(rect);
+            save_bitmap(*expected, std::wstring(arguments[2]) + L"/menu-expected.bmp");
+            save_bitmap(*view, std::wstring(arguments[2]) + L"/menu-selection.bmp");
+            for (int i = 0; i < expected->width() * expected->height(); ++i)
+                require(menu_pixels_match(reinterpret_cast<const unsigned char*>(view->pixels() + i),
+                                          reinterpret_cast<const unsigned char*>(expected->pixels() + i), 3),
+                        "The popup menu disappeared or changed inside the selection rectangle.");
+            mouse({rect.left, rect.bottom}, MOUSEEVENTF_LEFTUP);
+            if (retry)
+            {
+                pump(1800);
+                CloseClipboard();
+                require(IsWindowVisible(child.window), "A clipboard failure did not restore selection.");
+                mouse({rect.right, rect.top}, MOUSEEVENTF_LEFTDOWN);
+                mouse({rect.left, rect.bottom}, MOUSEEVENTF_LEFTUP);
+            }
+            child.exited();
+            verify_popup(fixture, *expected);
+        }
+        std::puts("PASS: popup menu pixels remain in selection, on the clipboard, and after a copy retry.");
         {
             marker(fixture);
             const auto sequence = GetClipboardSequenceNumber();
@@ -415,7 +552,8 @@ int wmain(int count, wchar_t** arguments)
             child.exited();
             require(GetClipboardSequenceNumber() == sequence, "Cancellation changed the clipboard.");
         }
-        std::puts("PASS: Escape before and during drag, right-click, and empty selections preserve the clipboard.");
+        std::puts(
+            "PASS: Escape before and during drag, right-click, and empty selections preserve the clipboard.");
         SetForegroundWindow(fixture);
         {
             Child child(arguments[1]);
