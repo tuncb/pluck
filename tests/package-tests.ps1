@@ -4,6 +4,14 @@ $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'scripts/version.ps1')
 . (Join-Path $root 'scripts/verify-native.ps1')
 $version = Get-PluckVersion
+$native = Get-PluckNativeImage (Join-Path $root 'artifacts/win-x64/Pluck.exe')
+foreach ($dependency in $native.Imports) {
+    if ($dependency -match '^(winhttp|bcrypt|ole32|oleaut32|combase|api-ms-win-core-winrt.*)\.dll$') {
+        throw "The capture startup loads a management dependency: $dependency"
+    }
+}
+if ($native.DelayImports -notcontains 'winhttp.dll') { throw 'The updater must load WinHTTP only on request.' }
+Write-Output 'PASS: management dependencies are delayed until requested'
 $temporary = Join-Path $root ('artifacts/package-tests-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temporary -Force | Out-Null
 $package = Join-Path $temporary 'app'
@@ -17,6 +25,15 @@ function Assert-Rejected([scriptblock]$Action, [string]$Name) {
 }
 $packageScript = Join-Path $root 'scripts/package.ps1'
 & $packageScript -PublishDirectory $package -ExpectedVersion $version -VerifyOnly
+$releaseAssets = Join-Path $temporary 'release-assets'
+& $packageScript -PublishDirectory $package -DestinationDirectory $releaseAssets -ExpectedVersion $version
+$updateExe = Join-Path $releaseAssets 'Pluck.exe'
+if ((Get-FileHash -LiteralPath $updateExe).Hash -ne (Get-FileHash -LiteralPath (Join-Path $package 'Pluck.exe')).Hash) {
+    throw 'The update asset differs from the packaged executable.'
+}
+$expectedChecksum = (Get-FileHash -LiteralPath $updateExe).Hash.ToLowerInvariant() + "  Pluck.exe`n"
+if ([IO.File]::ReadAllText("$updateExe.sha256") -cne $expectedChecksum) { throw 'The update checksum format differs.' }
+Write-Output 'PASS: update executable and checksum match the package'
 Set-Content -LiteralPath (Join-Path $package 'unexpected.txt') -Value 'not a runtime file'
 Assert-Rejected { & $packageScript -PublishDirectory $package -VerifyOnly } 'Reject extra package files'
 Remove-Item -LiteralPath (Join-Path $package 'unexpected.txt')

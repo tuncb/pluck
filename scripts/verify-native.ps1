@@ -35,23 +35,38 @@ function Get-PluckNativeImage {
         throw "Invalid PE address in $Path"
     }
     $imports = [Collections.Generic.List[string]]::new()
+    $delayImports = [Collections.Generic.List[string]]::new()
+    function Read-ImportName([uint32]$rva) {
+        $start = Convert-Rva $rva
+        $end = $start
+        while ($end -lt $bytes.Length -and $bytes[$end] -ne 0 -and $end - $start -lt 512) { $end++ }
+        if ($end -ge $bytes.Length -or $end - $start -ge 512) { throw "Invalid PE import name in $Path" }
+        [Text.Encoding]::ASCII.GetString($bytes, $start, $end - $start)
+    }
     $importRva = Read-U32 ($directories + 8)
     if ($importRva) {
         $descriptor = Convert-Rva $importRva
         for ($i = 0; $i -lt 256; $i++) {
             $nameRva = Read-U32 ($descriptor + 20 * $i + 12)
             if (-not $nameRva) { break }
-            $start = Convert-Rva $nameRva
-            $end = $start
-            while ($end -lt $bytes.Length -and $bytes[$end] -ne 0 -and $end - $start -lt 512) { $end++ }
-            if ($end -ge $bytes.Length -or $end - $start -ge 512) { throw "Invalid PE import name in $Path" }
-            $imports.Add([Text.Encoding]::ASCII.GetString($bytes, $start, $end - $start))
+            $imports.Add((Read-ImportName $nameRva))
         }
     }
-    foreach ($dependency in $imports) {
+    $delayRva = Read-U32 ($directories + 13 * 8)
+    if ($delayRva) {
+        $descriptor = Convert-Rva $delayRva
+        for ($i = 0; $i -lt 256; $i++) {
+            $entry = $descriptor + 32 * $i
+            $nameRva = Read-U32 ($entry + 4)
+            if (-not $nameRva) { break }
+            if ((Read-U32 $entry) -ne 1) { throw "Invalid PE delayed import in $Path" }
+            $delayImports.Add((Read-ImportName $nameRva))
+        }
+    }
+    foreach ($dependency in @($imports.ToArray()) + @($delayImports.ToArray())) {
         if ($dependency -match '^(mscoree|coreclr|hostfxr|hostpolicy|vcruntime\d.*|msvcp\d.*|concrt\d.*|clang_rt.*|libgcc_s.*|libstdc\+\+.*|libwinpthread.*)\.dll$') {
             throw "The executable requires an external runtime: $dependency ($Path)"
         }
     }
-    [pscustomobject]@{ Path = [IO.Path]::GetFullPath($Path); Architecture = 'x64'; ClrHeader = $false; Imports = $imports.ToArray() }
+    [pscustomobject]@{ Path = [IO.Path]::GetFullPath($Path); Architecture = 'x64'; ClrHeader = $false; Imports = $imports.ToArray(); DelayImports = $delayImports.ToArray() }
 }

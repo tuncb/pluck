@@ -1,5 +1,6 @@
 #include "capture.h"
 #include "selector.h"
+#include "app_process.h"
 #include <dwmapi.h>
 #include <ole2.h>
 #include <atomic>
@@ -75,11 +76,17 @@ class ClipboardBackup
     std::vector<std::pair<UINT, HANDLE>> data_;
 };
 unsigned fixture_escape_presses{};
+unsigned fixture_settings_presses{};
 LRESULT CALLBACK pattern_proc(HWND window, UINT message, WPARAM w, LPARAM l)
 {
     if (message == WM_KEYDOWN && w == VK_ESCAPE)
     {
         ++fixture_escape_presses;
+        return 0;
+    }
+    if (message == WM_KEYDOWN && w == VK_F2)
+    {
+        ++fixture_settings_presses;
         return 0;
     }
     if (message == WM_PAINT)
@@ -271,6 +278,46 @@ void escape()
     input[1].ki.dwFlags = KEYEVENTF_KEYUP;
     require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send Escape.");
 }
+void settings_key()
+{
+    INPUT input[2]{};
+    input[0].type = input[1].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = input[1].ki.wVk = VK_F2;
+    input[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send F2.");
+}
+class SettingsWindow
+{
+  public:
+    HWND window{};
+    HANDLE process{};
+    SettingsWindow()
+    {
+        const auto deadline = GetTickCount64() + 10000;
+        while (!(window = FindWindowW(pluck::SettingsClass, nullptr)) || !IsWindowVisible(window))
+        {
+            require(GetTickCount64() < deadline, "F2 did not open Settings.");
+            pump(10);
+        }
+        DWORD pid{};
+        GetWindowThreadProcessId(window, &pid);
+        process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        require(process != nullptr, "Cannot track the settings process.");
+        DWORD_PTR ignored{};
+        SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 2000, &ignored);
+        pump(100);
+    }
+    ~SettingsWindow()
+    {
+        if (window)
+            PostMessageW(window, WM_CLOSE, 0, 0);
+        if (process)
+        {
+            WaitForSingleObject(process, 6000);
+            CloseHandle(process);
+        }
+    }
+};
 class WindowChanges
 {
   public:
@@ -500,6 +547,49 @@ int wmain(int count, wchar_t** arguments)
             require(fixture_escape_presses == presses + 1, "Escape did not return to the previous app.");
         }
         std::puts("PASS: Escape before drawing exits without foreground focus and preserves the clipboard.");
+        for (int mode = 0; mode < 3; ++mode)
+        {
+            marker(fixture);
+            const auto sequence = GetClipboardSequenceNumber();
+            const auto presses = fixture_settings_presses;
+            SetForegroundWindow(fixture);
+            std::unique_ptr<ForegroundLock> lock;
+            if (mode == 2)
+                lock = std::make_unique<ForegroundLock>();
+            Child child(arguments[1], mode != 2);
+            if (mode == 1)
+            {
+                mouse(a, MOUSEEVENTF_LEFTDOWN);
+                mouse(b, 0);
+            }
+            settings_key();
+            child.exited();
+            lock.reset();
+            SettingsWindow settings;
+            if (mode == 1)
+                mouse(b, MOUSEEVENTF_LEFTUP);
+            require(GetClipboardSequenceNumber() == sequence, "F2 changed the clipboard.");
+            require(fixture_settings_presses == presses, "F2 reached the app behind capture.");
+            require(FindWindowW(pluck::SelectorClass, nullptr) == nullptr, "F2 left capture open.");
+            if (mode == 0)
+            {
+                RECT bounds{};
+                GetWindowRect(settings.window, &bounds);
+                const auto image = pluck::capture_desktop(bounds);
+                save_bitmap(*image, std::wstring(arguments[2]) + L"/settings.bmp");
+                SetForegroundWindow(fixture);
+                Child another(arguments[1]);
+                settings_key();
+                another.exited();
+                pump(100);
+                require(FindWindowW(pluck::SettingsClass, nullptr) == settings.window,
+                        "F2 opened a second settings window.");
+                require(WaitForSingleObject(settings.process, 0) == WAIT_TIMEOUT,
+                        "Capture exit closed Settings.");
+            }
+        }
+        std::puts("PASS: F2 before/during selection and without focus opens one settings process and "
+                  "preserves the clipboard.");
         std::vector<double> times;
         for (int direction = 0; direction < 4; ++direction)
         {
@@ -621,6 +711,57 @@ int wmain(int count, wchar_t** arguments)
                     std::puts("PASS: one selection across adjacent displays; exact pixels on both sides.");
                 }
             }
+        {
+            MONITORINFO monitor{sizeof(monitor)};
+            GetMonitorInfoW(MonitorFromWindow(fixture, MONITOR_DEFAULTTOPRIMARY), &monitor);
+            const int width = std::min(1000L, monitor.rcWork.right - monitor.rcWork.left - 40);
+            const int left = monitor.rcWork.left + (monitor.rcWork.right - monitor.rcWork.left - width) / 2;
+            const RECT region{left + 10, monitor.rcWork.bottom - 150, left + width - 10,
+                              monitor.rcWork.bottom - 5};
+            SetWindowPos(fixture, HWND_TOPMOST, left, monitor.rcWork.bottom - 200, width, 200,
+                         SWP_SHOWWINDOW);
+            SetForegroundWindow(fixture);
+            UpdateWindow(fixture);
+            pump(100);
+            mouse({region.left, region.top}, 0);
+            const auto expected = pluck::capture_desktop(region);
+            Child child(arguments[1]);
+            pump(100);
+            DwmFlush();
+            const auto ready = pluck::capture_desktop(region);
+            save_bitmap(*ready, std::wstring(arguments[2]) + L"/settings-hint.bmp");
+            const auto dimmed_matches = [&](const pluck::Bitmap& image)
+            {
+                for (int i = 0; i < image.width() * image.height(); ++i)
+                    for (unsigned shift : {0u, 8u, 16u})
+                    {
+                        const auto want = ((expected->pixels()[i] >> shift) & 255u) * 135u / 255u;
+                        const auto actual_pixel = (image.pixels()[i] >> shift) & 255u;
+                        if (want + 1 < actual_pixel || actual_pixel + 1 < want)
+                            return false;
+                    }
+                return true;
+            };
+            size_t hint_pixels{};
+            for (int i = 0; i < ready->width() * ready->height(); ++i)
+                if ((ready->pixels()[i] & 0x00ffffffu) == 0x00122620u)
+                    ++hint_pixels;
+            require(hint_pixels > 20, "The idle overlay has no settings hint.");
+            mouse({region.left, region.top}, MOUSEEVENTF_LEFTDOWN);
+            DwmFlush();
+            require(dimmed_matches(*pluck::capture_desktop(region)),
+                    "The hint did not disappear on mouse-down.");
+            mouse({region.left, region.top}, MOUSEEVENTF_LEFTUP);
+            DwmFlush();
+            require(!dimmed_matches(*pluck::capture_desktop(region)),
+                    "The hint did not return after an empty click.");
+            mouse({region.left, region.top}, MOUSEEVENTF_LEFTDOWN);
+            mouse({region.right, region.bottom}, MOUSEEVENTF_LEFTUP);
+            child.exited();
+            verify_popup(fixture, *expected);
+        }
+        std::puts("PASS: the hint hides on mouse-down, returns after an empty click, and is absent from "
+                  "copied pixels.");
         for (int i = 0; i < 6; ++i)
         {
             SetForegroundWindow(fixture);

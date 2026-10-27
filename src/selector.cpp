@@ -1,4 +1,6 @@
 #include "selector.h"
+#include "app_process.h"
+#include <shellscalingapi.h>
 #include <stdexcept>
 #include <string>
 
@@ -46,6 +48,7 @@ class Selector
                                   bounds_.bottom - bounds_.top, nullptr, nullptr, instance, this);
         if (!window_)
             throw std::runtime_error("Cannot open the selection window.");
+        prepare_shortcut_hint();
         // A launcher can show the overlay without giving it keyboard focus.
         if (!start_escape_hook())
         {
@@ -62,6 +65,8 @@ class Selector
         stop_escape_hook();
         if (IsWindow(window_))
             DestroyWindow(window_);
+        if (shortcut_font_)
+            DeleteObject(shortcut_font_);
     }
     int run()
     {
@@ -87,6 +92,77 @@ class Selector
     GlobalMemory pending_;
     ULONGLONG copy_started_{};
     const wchar_t* hint_{};
+    HFONT shortcut_font_{};
+    RECT shortcut_rect_{};
+    bool opening_settings_{};
+    inline static bool settings_key_down_{};
+
+    void prepare_shortcut_hint()
+    {
+        POINT point{};
+        GetCursorPos(&point);
+        const auto display = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO monitor{sizeof(monitor)};
+        if (!GetMonitorInfoW(display, &monitor))
+            return;
+        UINT dpi = GetDpiForWindow(window_), dpi_y{};
+        GetDpiForMonitor(display, MDT_EFFECTIVE_DPI, &dpi, &dpi_y);
+        shortcut_font_ = CreateFontW(-MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        const auto dc = GetDC(window_);
+        const auto old = SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
+        SIZE size{};
+        constexpr wchar_t text[] = L"Press F2 to open settings";
+        GetTextExtentPoint32W(dc, text, static_cast<int>(std::size(text) - 1), &size);
+        SelectObject(dc, old);
+        ReleaseDC(window_, dc);
+        const auto margin = MulDiv(20, dpi, 96), padding = MulDiv(12, dpi, 96);
+        const auto width =
+            std::min(size.cx + 2 * padding, monitor.rcWork.right - monitor.rcWork.left - 2 * margin);
+        const auto height = size.cy + MulDiv(16, dpi, 96);
+        const auto left = monitor.rcWork.left + (monitor.rcWork.right - monitor.rcWork.left - width) / 2;
+        shortcut_rect_ = {left - bounds_.left, monitor.rcWork.bottom - margin - height - bounds_.top,
+                          left + width - bounds_.left, monitor.rcWork.bottom - margin - bounds_.top};
+    }
+    void paint_shortcut_hint(HDC dc)
+    {
+        if (dragging_ || copying_ || closing_ || hint_ || IsRectEmpty(&shortcut_rect_))
+            return;
+        const auto old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+        const auto old_pen = SelectObject(dc, GetStockObject(DC_PEN));
+        const auto old_font =
+            SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
+        SetDCBrushColor(dc, RGB(18, 38, 32));
+        SetDCPenColor(dc, RGB(55, 184, 173));
+        RoundRect(dc, shortcut_rect_.left, shortcut_rect_.top, shortcut_rect_.right, shortcut_rect_.bottom, 8,
+                  8);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(208, 255, 241));
+        auto text = shortcut_rect_;
+        DrawTextW(dc, L"Press F2 to open settings", -1, &text,
+                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        SelectObject(dc, old_font);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+    }
+    void open_settings()
+    {
+        if (opening_settings_ || closing_ || copying_)
+            return;
+        opening_settings_ = true;
+        try
+        {
+            launch_settings();
+            finish();
+        }
+        catch (const std::exception&)
+        {
+            opening_settings_ = false;
+            hint_ = L"Cannot open settings. Press F2 to try again, or Esc to cancel.";
+            InvalidateRect(window_, nullptr, FALSE);
+        }
+    }
 
     RECT area() const noexcept
     {
@@ -102,6 +178,7 @@ class Selector
     bool start_escape_hook() noexcept
     {
         escape_window_ = window_;
+        settings_key_down_ = false;
         escape_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_procedure, GetModuleHandleW(nullptr), 0);
         if (!escape_hook_)
             escape_window_ = nullptr;
@@ -214,6 +291,7 @@ class Selector
             if (font)
                 DeleteObject(font);
         }
+        paint_shortcut_hint(dc);
         EndPaint(window_, &ps);
     }
     LRESULT handle(UINT message, WPARAM w, LPARAM l)
@@ -228,6 +306,11 @@ class Selector
         case WM_KEYDOWN:
             if (w == VK_ESCAPE)
                 finish();
+            else if (w == VK_F2)
+                open_settings();
+            return 0;
+        case OpenSettingsMessage:
+            open_settings();
             return 0;
         case WM_RBUTTONDOWN:
         case WM_CLOSE:
@@ -243,6 +326,7 @@ class Selector
             {
                 const auto previous = area();
                 dragging_ = true;
+                InvalidateRect(window_, &shortcut_rect_, FALSE);
                 start_ = end_ = cursor();
                 SetCapture(window_);
                 redraw_selection(previous);
@@ -269,6 +353,7 @@ class Selector
                 const auto selected = area();
                 if (has_area(selected))
                     capture_selection(selected);
+                InvalidateRect(window_, &shortcut_rect_, FALSE);
                 InvalidateRect(window_, nullptr, FALSE);
             }
             return 0;
@@ -280,6 +365,7 @@ class Selector
                 dragging_ = false;
                 end_ = start_;
                 redraw_selection(previous);
+                InvalidateRect(window_, &shortcut_rect_, FALSE);
                 if (GetCapture() == window_)
                     ReleaseCapture();
             }
@@ -296,6 +382,21 @@ class Selector
     }
     static LRESULT CALLBACK keyboard_procedure(int code, WPARAM w, LPARAM l) noexcept
     {
+        if (code == HC_ACTION && reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_F2 &&
+            escape_window_ && IsWindowVisible(escape_window_))
+        {
+            if (w == WM_KEYUP || w == WM_SYSKEYUP)
+            {
+                settings_key_down_ = false;
+                return 1;
+            }
+            if (w == WM_KEYDOWN || w == WM_SYSKEYDOWN)
+            {
+                if (!settings_key_down_)
+                    settings_key_down_ = PostMessageW(escape_window_, OpenSettingsMessage, 0, 0) != FALSE;
+                return settings_key_down_ ? 1 : CallNextHookEx(nullptr, code, w, l);
+            }
+        }
         if (code == HC_ACTION && (w == WM_KEYDOWN || w == WM_SYSKEYDOWN) &&
             reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_ESCAPE && escape_window_ &&
             IsWindowVisible(escape_window_))

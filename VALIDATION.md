@@ -1,3 +1,46 @@
+# Settings and installation validation
+
+Checked on Windows x64 on 2026-10-27. The build retains version 0.2.2.
+
+- Release build, core tests, management tests, and package checks passed.
+- The package contains one native executable. Management DLLs use delayed imports.
+  The capture startup does not load WinHTTP, COM, or the JSON runtime.
+- Offline integration tests ran the real install and update helpers with isolated
+  user folders and a redirected registry. They checked installation, both Start
+  menu shortcuts, uninstall, retention of unknown files, rejection of a changed
+  download, waiting for capture to exit, executable replacement, registry version
+  updates, and reopening settings.
+- Desktop tests checked F2 before and during a drag, F2 without foreground focus,
+  reuse of the settings window, and clipboard preservation. They also checked
+  that the hint hides on mouse-down, returns after an empty click, and is absent
+  from copied pixels. Existing capture, popup-menu, clipboard-retry, and
+  multiple-display checks passed.
+- The native settings window and hint were inspected from desktop-test images.
+  The settings window uses the icon's mint and teal palette and follows the
+  Windows theme. Buttons are keyboard accessible native controls.
+- AddressSanitizer builds passed the core, management, isolated installation,
+  and complete desktop tests. No sanitizer error was reported.
+- A live check through the Settings button reached GitHub and reported that
+  Pluck was up to date. The window remained responsive and closed normally.
+- Release startup to a painted foreground overlay measured 339.8 ms median,
+  326.0 ms minimum, and 455.6 ms maximum over ten launches. The pre-change median
+  was 338.9 ms. These local samples retain the Windows file cache and do not
+  measure cold-boot startup.
+- The Release executable is 800,768 bytes. The ZIP is 230,061 bytes.
+
+Build and test commands:
+
+```powershell
+./build.ps1 -Test -Publish
+./tests/package-tests.ps1
+./scripts/package.ps1
+./scripts/smoke-test.ps1
+./build.ps1 -Configuration RelWithDebInfo -Sanitize -Test
+```
+
+The offline update test uses a local versioned fixture. It does not publish a
+GitHub release or replace a user's installed Pluck app.
+
 # Version 0.1.0 validation
 
 Checked on Windows x64 with MSVC 19.51 and two displays: 3840 x 2160 at

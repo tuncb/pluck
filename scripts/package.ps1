@@ -46,6 +46,11 @@ try {
 } finally { $archive.Dispose() }
 $hash = (Get-FileHash -LiteralPath $archivePath).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$archivePath.sha256", "$hash  pluck-windows-x64.zip`n", [Text.UTF8Encoding]::new($false))
+$updateExecutable = Join-Path $DestinationDirectory 'Pluck.exe'
+Copy-Item -LiteralPath $application -Destination $updateExecutable -Force
+$updateHash = (Get-FileHash -LiteralPath $updateExecutable).Hash.ToLowerInvariant()
+if ($updateHash -ne (Get-FileHash -LiteralPath $application).Hash.ToLowerInvariant()) { throw 'Update executable verification failed.' }
+[IO.File]::WriteAllText("$updateExecutable.sha256", "$updateHash  Pluck.exe`n", [Text.UTF8Encoding]::new($false))
 [ordered]@{
     version = $version; fileCount = 1; archiveBytes = (Get-Item -LiteralPath $archivePath).Length
     sha256 = $hash; executable = $image

@@ -73,7 +73,9 @@ jobs:
 
       - name: Verify package checksum
         working-directory: release-assets
-        run: sha256sum --check pluck-windows-x64.zip.sha256
+        run: |
+          sha256sum --check pluck-windows-x64.zip.sha256
+          sha256sum --check Pluck.exe.sha256
 
       - name: Publish release in this repository
         env:
@@ -87,7 +89,9 @@ jobs:
 
           Extract the ZIP and run **Pluck.exe**. Drag a rectangle, then release to copy the image. Press Escape or right-click to cancel.
 
-          Portable native executable. No installer, .NET, or separate Visual C++ runtime is required.
+          Press **F2** during selection to open Settings. You can install Pluck for your Windows user and check for updates there.
+
+          Portable native executable. No .NET or separate Visual C++ runtime is required.
 
           ## Changes
           EOF
@@ -97,7 +101,7 @@ jobs:
             found && /^v[0-9]+\.[0-9]+\.[0-9]+$/ { exit }
             found { print }
           ' changelog.txt >> "$notes"
-          assets=(release-assets/pluck-windows-x64.zip release-assets/pluck-windows-x64.zip.sha256)
+          assets=(release-assets/pluck-windows-x64.zip release-assets/pluck-windows-x64.zip.sha256 release-assets/Pluck.exe release-assets/Pluck.exe.sha256)
           # A rerun may complete a draft, but must not replace a published binary.
           if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null; then
             if ! jq -e '.isDraft == true' "$RUNNER_TEMP/release.json" >/dev/null; then

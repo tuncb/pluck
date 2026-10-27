@@ -36,18 +36,36 @@ configure_file(src/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" @ONL
 configure_file(src/app.manifest.in "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest" @ONLY)
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
     PROPERTIES OBJECT_DEPENDS "${PLUCK_ICON}")
-add_executable(Pluck WIN32 src/main.cpp src/selector.cpp
+add_library(pluck_management STATIC src/process.cpp src/management.cpp src/update.cpp)
+target_link_libraries(pluck_management PUBLIC pluck_core shell32 ole32 advapi32 bcrypt version winhttp windowsapp)
+target_compile_definitions(pluck_management PRIVATE WINRT_LEAN_AND_MEAN)
+add_executable(Pluck WIN32 src/main.cpp src/selector.cpp src/settings.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
-target_link_libraries(Pluck PRIVATE pluck_core)
+target_link_libraries(Pluck PRIVATE pluck_management dwmapi shcore delayimp)
+# The capture path does not initialize management APIs. Load their DLLs on first use.
+target_link_options(Pluck PRIVATE /DELAYLOAD:shell32.dll /DELAYLOAD:ole32.dll /DELAYLOAD:advapi32.dll
+    /DELAYLOAD:bcrypt.dll /DELAYLOAD:version.dll /DELAYLOAD:winhttp.dll /DELAYLOAD:dwmapi.dll /DELAYLOAD:shcore.dll
+    /DELAYLOAD:oleaut32.dll /DELAYLOAD:api-ms-win-core-winrt-error-l1-1-1.dll /DELAYLOAD:api-ms-win-core-winrt-l1-1-0.dll)
 if(NOT PLUCK_SANITIZE)
-    set_property(TARGET pluck_core Pluck PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET pluck_core pluck_management Pluck PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 enable_testing()
 add_executable(pluck_tests tests/core_tests.cpp)
 target_link_libraries(pluck_tests PRIVATE pluck_core)
 add_test(NAME core COMMAND pluck_tests)
 set_tests_properties(core PROPERTIES TIMEOUT 30)
+add_executable(pluck_management_tests tests/management_tests.cpp)
+target_link_libraries(pluck_management_tests PRIVATE pluck_management)
+add_test(NAME management COMMAND pluck_management_tests "$<TARGET_FILE:Pluck>")
+set_tests_properties(management PROPERTIES TIMEOUT 30)
+add_executable(pluck_install_fixture WIN32 tests/install_fixture.cpp src/management.cpp src/process.cpp src/update.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc" "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
+target_compile_definitions(pluck_install_fixture PRIVATE PLUCK_TEST_ENVIRONMENT WINRT_LEAN_AND_MEAN)
+target_link_libraries(pluck_install_fixture PRIVATE pluck_core shell32 ole32 advapi32 bcrypt version winhttp windowsapp)
+add_test(NAME install_integration COMMAND pwsh -NoLogo -NoProfile -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/install-tests.ps1"
+    -Executable "$<TARGET_FILE:pluck_install_fixture>")
+set_tests_properties(install_integration PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 add_executable(pluck_desktop_tests tests/desktop_tests.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
 target_link_libraries(pluck_desktop_tests PRIVATE pluck_core ole32 dwmapi)
