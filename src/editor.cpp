@@ -655,7 +655,7 @@ class Editor
             RECT status_rect{info_rect.right + px(8), 0, buttons_left, bar_h};
             if (status_rect.right > status_rect.left)
             {
-                SetTextColor(dc, status_error_ ? palette_.error_ink : palette_.muted);
+                SetTextColor(dc, status_error_ ? palette_.error_ink : palette_.ink);
                 DrawTextW(dc, status_text_.c_str(), -1, &status_rect,
                           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
             }
@@ -705,7 +705,8 @@ class Editor
         {
             KillTimer(window_, CopyRetryTimer);
             copying_ = false;
-            DestroyWindow(window_);
+            update_buttons();
+            set_status(L"Copied to clipboard.");
             return;
         }
         if (result == CopyResult::Failed || GetTickCount64() - copy_started_ >= 1500)
@@ -756,6 +757,7 @@ class Editor
                     dialog->SetDefaultFolder(folder.Get());
             }
 
+            hovered_button_ = nullptr;
             saving_dialog_ = true;
             update_buttons();
             const HRESULT chosen = dialog->Show(window_);
@@ -787,7 +789,8 @@ class Editor
         try
         {
             document_.save_png(destination);
-            DestroyWindow(window_);
+            const auto saved_name = destination.filename().wstring();
+            set_status(saved_name.empty() ? L"Saved PNG." : L"Saved " + saved_name + L".");
         }
         catch (const std::exception& error)
         {

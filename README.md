@@ -14,9 +14,9 @@ and selection border switch to mint while edit mode is active. Press **E** again
 turn edit mode off. When you release the mouse button in edit mode, Pluck opens the
 captured image in **Pluck Editor** instead of copying it immediately. In the editor:
 
-- Select **Copy** (or press **Ctrl+C**) to copy the image to the clipboard and close.
-- Select **Save PNG** (or press **Ctrl+S**) to save the image as a PNG file and close.
-- Press **Escape** or close the window to discard the capture without changing the clipboard.
+- Select **Copy** (or press **Ctrl+C**) to copy the image to the clipboard.
+- Select **Save PNG** (or press **Ctrl+S**) to save the image as a PNG file.
+- Press **Escape** or close the window when you finish. Closing without copying preserves the clipboard.
 
 Press **F2** before or during selection to open **Pluck Settings**. This cancels
 selection and preserves the clipboard. Settings runs in a separate process.

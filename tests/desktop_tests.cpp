@@ -688,14 +688,28 @@ int wmain(int count, wchar_t** arguments)
             require(IsWindow(editor), "A concurrent capture closed the open editor.");
 
             marker(fixture);
+            const auto copy_sequence = GetClipboardSequenceNumber();
             SetForegroundWindow(editor);
             pump(60);
             ctrl_key('C');
+            const auto copy_deadline = GetTickCount64() + 3000;
+            while (GetClipboardSequenceNumber() == copy_sequence)
+            {
+                require(GetTickCount64() < copy_deadline, "Ctrl+C in the editor did not copy the image.");
+                pump(10);
+            }
+            pump(100);
+            require(IsWindow(editor) && IsWindowVisible(editor),
+                    "Ctrl+C closed the editor window.");
+            verify_image(fixture);
+            SetForegroundWindow(editor);
+            pump(50);
+            escape();
             child.exited();
             verify_image(fixture);
         }
         {
-            // Mode 1: E during drag opens the editor; Ctrl+C retries a busy clipboard and closes.
+            // Mode 1: E during drag opens the editor; Ctrl+C retries a busy clipboard and stays open.
             marker(fixture);
             const auto sequence = GetClipboardSequenceNumber();
             SetForegroundWindow(fixture);
@@ -714,6 +728,19 @@ int wmain(int count, wchar_t** arguments)
             pump(250);
             require(IsWindow(editor), "A locked clipboard closed the editor early.");
             CloseClipboard();
+            const auto retry_deadline = GetTickCount64() + 3000;
+            while (GetClipboardSequenceNumber() == sequence)
+            {
+                require(GetTickCount64() < retry_deadline, "Editor clipboard retry did not copy the image.");
+                pump(10);
+            }
+            pump(100);
+            require(IsWindow(editor) && IsWindowVisible(editor),
+                    "Clipboard retry copy closed the editor window.");
+            verify_image(fixture);
+            SetForegroundWindow(editor);
+            pump(50);
+            escape();
             child.exited();
             verify_image(fixture);
         }
