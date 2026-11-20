@@ -6,12 +6,13 @@ $root = Split-Path -Parent $PSScriptRoot
 $version = Get-PluckVersion
 $native = Get-PluckNativeImage (Join-Path $root 'artifacts/win-x64/Pluck.exe')
 foreach ($dependency in $native.Imports) {
-    if ($dependency -match '^(winhttp|bcrypt|ole32|oleaut32|combase|api-ms-win-core-winrt.*)\.dll$') {
-        throw "The capture startup loads a management dependency: $dependency"
+    if ($dependency -match '^(winhttp|bcrypt|ole32|oleaut32|combase|d2d1|windowscodecs|api-ms-win-core-com.*|api-ms-win-core-winrt.*)\.dll$') {
+        throw "The capture startup loads a management or editor dependency: $dependency"
     }
 }
 if ($native.DelayImports -notcontains 'winhttp.dll') { throw 'The updater must load WinHTTP only on request.' }
-Write-Output 'PASS: management dependencies are delayed until requested'
+if ($native.DelayImports -notcontains 'd2d1.dll') { throw 'The editor must load Direct2D only on request.' }
+Write-Output 'PASS: management and editor dependencies are delayed until requested'
 $temporary = Join-Path $root ('artifacts/package-tests-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temporary -Force | Out-Null
 $package = Join-Path $temporary 'app'

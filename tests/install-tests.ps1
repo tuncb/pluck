@@ -11,15 +11,16 @@ $marker = Join-Path $taskRoot 'settings-opened.txt'
 $failure = Join-Path $taskRoot 'last-error.txt'
 $uninstallKey = Join-Path $registryRoot 'Software/Microsoft/Windows/CurrentVersion/Uninstall/Pluck'
 $captureGate = $null
+$editorGate = $null
 function Invoke-Fixture([string]$Path, [string[]]$Arguments) {
     $process = Start-Process -FilePath $Path -ArgumentList $Arguments -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(15000)) { throw 'The installer fixture did not exit.' }
     if ($process.ExitCode -ne 0) { throw "Fixture failed: $(Get-Content -LiteralPath $failure -ErrorAction SilentlyContinue)" }
 }
-function Wait-For([scriptblock]$Condition) {
+function Wait-For([scriptblock]$Condition, [switch]$AllowFailure) {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (& $Condition)) {
-        if (Test-Path -LiteralPath $failure) { throw "Helper failed: $(Get-Content -LiteralPath $failure -Raw)" }
+        if (-not $AllowFailure -and (Test-Path -LiteralPath $failure)) { throw "Helper failed: $(Get-Content -LiteralPath $failure -Raw)" }
         if ([DateTime]::UtcNow -gt $deadline) { throw 'The installer helper timed out.' }
         Start-Sleep -Milliseconds 50
     }
@@ -45,12 +46,13 @@ try {
     Invoke-Fixture $Executable @('--make-update', ('"' + $incoming + '"'))
     $before = (Get-FileHash -LiteralPath $installed).Hash
     Invoke-Fixture $installed @('--stage-update', ('"' + $incoming + '"'), '--bad-hash')
-    Wait-For { Test-Path -LiteralPath $failure }
+    Wait-For { Test-Path -LiteralPath $failure } -AllowFailure
     if ((Get-Content -LiteralPath $failure -Raw) -notmatch 'changed after download') { throw 'The invalid hash was not checked.' }
     if ((Get-FileHash -LiteralPath $installed).Hash -ne $before) { throw 'An invalid update changed the app.' }
     Remove-Item -LiteralPath $failure
     Remove-Item -LiteralPath $marker
     $captureGate = [Threading.Mutex]::new($false, 'Local\Pluck.Screenshot')
+    $editorGate = [Threading.Mutex]::new($false, 'Local\Pluck.Editor')
     Invoke-Fixture $installed @('--stage-update', ('"' + $incoming + '"'))
     Wait-For {
         try { $gate = [Threading.Mutex]::OpenExisting('Local\Pluck.Maintenance'); $gate.Dispose(); return $true }
@@ -59,14 +61,19 @@ try {
     if ((Get-FileHash -LiteralPath $installed).Hash -ne $before) { throw 'The update replaced an active capture.' }
     $captureGate.Dispose()
     $captureGate = $null
+    Start-Sleep -Milliseconds 200
+    if ((Get-FileHash -LiteralPath $installed).Hash -ne $before) { throw 'The update replaced an active editor.' }
+    $editorGate.Dispose()
+    $editorGate = $null
     Wait-For { Test-Path -LiteralPath $marker }
     if ((Get-FileHash -LiteralPath $installed).Hash -ne (Get-FileHash -LiteralPath $incoming).Hash) { throw 'The helper did not replace the app.' }
     $expected = [Diagnostics.FileVersionInfo]::GetVersionInfo($incoming)
     $expectedVersion = "$($expected.ProductMajorPart).$($expected.ProductMinorPart).$($expected.ProductBuildPart)"
     if ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -ne $expectedVersion) { throw 'The Windows version was not updated.' }
-    Write-Output 'PASS: invalid SHA-256 is rejected; update waits for capture, replaces the app, and reopens settings'
+    Write-Output 'PASS: invalid SHA-256 is rejected; update waits for capture and editor, replaces the app, and reopens settings'
 } finally {
     if ($captureGate) { $captureGate.Dispose() }
+    if ($editorGate) { $editorGate.Dispose() }
     $env:PLUCK_FIXTURE_ROOT = $priorRoot
     # Confirm all targets stay in this test root before process cleanup or recursive removal.
     $absoluteRoot = [IO.Path]::GetFullPath($taskRoot)

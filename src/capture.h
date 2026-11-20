@@ -64,6 +64,7 @@ using GlobalMemory = std::unique_ptr<void, GlobalDeleter>;
 
 RECT desktop_bounds() noexcept;
 std::unique_ptr<Bitmap> capture_desktop(RECT bounds);
+std::unique_ptr<Bitmap> crop_bitmap(const Bitmap& source, RECT crop);
 GlobalMemory make_clipboard_dib(const Bitmap& source, RECT crop);
 enum class CopyResult
 {

@@ -77,6 +77,7 @@ class ClipboardBackup
 };
 unsigned fixture_escape_presses{};
 unsigned fixture_settings_presses{};
+unsigned fixture_edit_presses{};
 LRESULT CALLBACK pattern_proc(HWND window, UINT message, WPARAM w, LPARAM l)
 {
     if (message == WM_KEYDOWN && w == VK_ESCAPE)
@@ -87,6 +88,11 @@ LRESULT CALLBACK pattern_proc(HWND window, UINT message, WPARAM w, LPARAM l)
     if (message == WM_KEYDOWN && w == VK_F2)
     {
         ++fixture_settings_presses;
+        return 0;
+    }
+    if (message == WM_KEYDOWN && w == 'E')
+    {
+        ++fixture_edit_presses;
         return 0;
     }
     if (message == WM_PAINT)
@@ -155,7 +161,16 @@ struct Child
         {
             if (WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT)
             {
-                PostMessageW(window, WM_CLOSE, 0, 0);
+                if (IsWindow(window))
+                    PostMessageW(window, WM_CLOSE, 0, 0);
+                HWND editor = nullptr;
+                while ((editor = FindWindowExW(nullptr, editor, pluck::EditorClass, nullptr)) != nullptr)
+                {
+                    DWORD owner{};
+                    GetWindowThreadProcessId(editor, &owner);
+                    if (owner == process.dwProcessId)
+                        PostMessageW(editor, WM_CLOSE, 0, 0);
+                }
                 if (WaitForSingleObject(process.hProcess, 2000) == WAIT_TIMEOUT)
                     TerminateProcess(process.hProcess, 1);
             }
@@ -285,6 +300,54 @@ void settings_key()
     input[0].ki.wVk = input[1].ki.wVk = VK_F2;
     input[1].ki.dwFlags = KEYEVENTF_KEYUP;
     require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send F2.");
+}
+void edit_key()
+{
+    INPUT input[2]{};
+    input[0].type = input[1].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = input[1].ki.wVk = 'E';
+    input[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send E.");
+}
+void ctrl_key(WORD key)
+{
+    INPUT input[4]{};
+    for (auto& item : input)
+        item.type = INPUT_KEYBOARD;
+    input[0].ki.wVk = VK_CONTROL;
+    input[1].ki.wVk = key;
+    input[2].ki.wVk = key;
+    input[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    input[3].ki.wVk = VK_CONTROL;
+    input[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    require(SendInput(4, input, sizeof(INPUT)) == 4, "Cannot send a Ctrl shortcut.");
+}
+HWND find_owned_window(const wchar_t* class_name, DWORD pid)
+{
+    HWND current = nullptr;
+    while ((current = FindWindowExW(nullptr, current, class_name, nullptr)) != nullptr)
+    {
+        DWORD owner{};
+        GetWindowThreadProcessId(current, &owner);
+        if (owner == pid && IsWindowVisible(current))
+            return current;
+    }
+    return nullptr;
+}
+HWND wait_for_editor(DWORD pid)
+{
+    const auto deadline = GetTickCount64() + 10000;
+    HWND editor = nullptr;
+    while (!(editor = find_owned_window(pluck::EditorClass, pid)))
+    {
+        require(GetTickCount64() < deadline, "Edit mode did not open the editor window.");
+        pump(10);
+    }
+    DWORD_PTR ignored{};
+    SendMessageTimeoutW(editor, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 2000, &ignored);
+    pump(100);
+    DwmFlush();
+    return editor;
 }
 class SettingsWindow
 {
@@ -590,6 +653,108 @@ int wmain(int count, wchar_t** arguments)
         }
         std::puts("PASS: F2 before/during selection and without focus opens one settings process and "
                   "preserves the clipboard.");
+        {
+            // Mode 0: E before drag opens the editor, preserves clipboard, allows concurrent capture,
+            // and Ctrl+C copies exact pixels and closes the editor.
+            marker(fixture);
+            const auto sequence = GetClipboardSequenceNumber();
+            const auto presses = fixture_edit_presses;
+            SetForegroundWindow(fixture);
+            Child child(arguments[1]);
+            edit_key();
+            pump(60);
+            mouse(a, MOUSEEVENTF_LEFTDOWN);
+            mouse(b, 0);
+            mouse(b, MOUSEEVENTF_LEFTUP);
+            const auto editor = wait_for_editor(child.process.dwProcessId);
+            require(fixture_edit_presses == presses, "E reached the app behind capture.");
+            require(FindWindowW(pluck::SelectorClass, nullptr) == nullptr, "Edit mode left selector open.");
+            require(GetClipboardSequenceNumber() == sequence, "Opening the editor changed the clipboard.");
+            RECT editor_bounds{};
+            GetWindowRect(editor, &editor_bounds);
+            const auto editor_shot = pluck::capture_desktop(editor_bounds);
+            save_bitmap(*editor_shot, std::wstring(arguments[2]) + L"/editor.bmp");
+
+            // A second capture must work while an editor window is open.
+            SetForegroundWindow(fixture);
+            pump(50);
+            {
+                Child concurrent(arguments[1]);
+                mouse(a, MOUSEEVENTF_LEFTDOWN);
+                mouse(b, MOUSEEVENTF_LEFTUP);
+                concurrent.exited();
+                verify_image(fixture);
+            }
+            require(IsWindow(editor), "A concurrent capture closed the open editor.");
+
+            marker(fixture);
+            SetForegroundWindow(editor);
+            pump(60);
+            ctrl_key('C');
+            child.exited();
+            verify_image(fixture);
+        }
+        {
+            // Mode 1: E during drag opens the editor; Ctrl+C retries a busy clipboard and closes.
+            marker(fixture);
+            const auto sequence = GetClipboardSequenceNumber();
+            SetForegroundWindow(fixture);
+            Child child(arguments[1]);
+            mouse(a, MOUSEEVENTF_LEFTDOWN);
+            mouse(b, 0);
+            edit_key();
+            pump(60);
+            mouse(b, MOUSEEVENTF_LEFTUP);
+            const auto editor = wait_for_editor(child.process.dwProcessId);
+            require(GetClipboardSequenceNumber() == sequence, "Opening the editor during drag changed the clipboard.");
+            open_clipboard(fixture);
+            SetForegroundWindow(editor);
+            pump(50);
+            ctrl_key('C');
+            pump(250);
+            require(IsWindow(editor), "A locked clipboard closed the editor early.");
+            CloseClipboard();
+            child.exited();
+            verify_image(fixture);
+        }
+        {
+            // Mode 2: E without foreground focus does not leak to the background app, and Esc closes the editor.
+            marker(fixture);
+            const auto sequence = GetClipboardSequenceNumber();
+            const auto presses = fixture_edit_presses;
+            SetForegroundWindow(fixture);
+            ForegroundLock lock;
+            Child child(arguments[1], false);
+            edit_key();
+            pump(60);
+            mouse(a, MOUSEEVENTF_LEFTDOWN);
+            mouse(b, MOUSEEVENTF_LEFTUP);
+            const auto editor = wait_for_editor(child.process.dwProcessId);
+            require(fixture_edit_presses == presses, "E without focus reached the app behind capture.");
+            require(GetClipboardSequenceNumber() == sequence, "Editor changed the clipboard before Esc.");
+            SetForegroundWindow(editor);
+            pump(50);
+            escape();
+            child.exited();
+            require(GetClipboardSequenceNumber() == sequence, "Esc in the editor changed the clipboard.");
+        }
+        {
+            // Mode 3: Pressing E twice cancels edit mode and restores direct copy-and-exit.
+            SetForegroundWindow(fixture);
+            Child child(arguments[1]);
+            edit_key();
+            pump(50);
+            edit_key();
+            pump(50);
+            mouse(a, MOUSEEVENTF_LEFTDOWN);
+            mouse(b, MOUSEEVENTF_LEFTUP);
+            child.exited();
+            require(FindWindowW(pluck::EditorClass, nullptr) == nullptr,
+                    "Toggling edit mode off still opened the editor.");
+            verify_image(fixture);
+        }
+        std::puts("PASS: edit mode (E before/during drag, without focus, toggle off, concurrent capture, "
+                  "Ctrl+C copy + retry, and Esc close).");
         std::vector<double> times;
         for (int direction = 0; direction < 4; ++direction)
         {
@@ -747,6 +912,19 @@ int wmain(int count, wchar_t** arguments)
                 if ((ready->pixels()[i] & 0x00ffffffu) == 0x00122620u)
                     ++hint_pixels;
             require(hint_pixels > 20, "The idle overlay has no settings hint.");
+            edit_key();
+            pump(100);
+            DwmFlush();
+            const auto armed = pluck::capture_desktop(region);
+            save_bitmap(*armed, std::wstring(arguments[2]) + L"/edit-mode-hint.bmp");
+            size_t armed_pixels{};
+            for (int i = 0; i < armed->width() * armed->height(); ++i)
+                if ((armed->pixels()[i] & 0x00ffffffu) == 0x0077f4d5u)
+                    ++armed_pixels;
+            require(armed_pixels > 20, "Edit mode did not highlight the shortcut hint.");
+            edit_key();
+            pump(100);
+            DwmFlush();
             mouse({region.left, region.top}, MOUSEEVENTF_LEFTDOWN);
             DwmFlush();
             require(dimmed_matches(*pluck::capture_desktop(region)),

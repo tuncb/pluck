@@ -79,6 +79,10 @@ class Selector
         }
         return result == -1 ? 1 : static_cast<int>(message.wParam);
     }
+    SelectorResult take_result(int exit_code) noexcept
+    {
+        return {exit_code, std::move(edit_image_), edit_screen_rect_};
+    }
 
   private:
     RECT bounds_{};
@@ -93,10 +97,42 @@ class Selector
     ULONGLONG copy_started_{};
     const wchar_t* hint_{};
     HFONT shortcut_font_{};
+    RECT shortcut_monitor_work_{};
+    UINT shortcut_dpi_{96};
     RECT shortcut_rect_{};
     bool opening_settings_{};
+    bool edit_mode_{};
+    std::unique_ptr<Bitmap> edit_image_;
+    RECT edit_screen_rect_{};
     inline static bool settings_key_down_{};
+    inline static bool edit_key_down_{};
 
+    const wchar_t* shortcut_text() const noexcept
+    {
+        return edit_mode_ ? L"Edit mode on (E to cancel)  \u00b7  F2 for settings"
+                          : L"Press E for edit mode  \u00b7  F2 for settings";
+    }
+    void update_shortcut_rect()
+    {
+        if (IsRectEmpty(&shortcut_monitor_work_))
+            return;
+        const auto dc = GetDC(window_);
+        const auto old = SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
+        SIZE size{};
+        const auto* text = shortcut_text();
+        GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &size);
+        SelectObject(dc, old);
+        ReleaseDC(window_, dc);
+        const auto margin = MulDiv(20, shortcut_dpi_, 96);
+        const auto padding = MulDiv(12, shortcut_dpi_, 96);
+        const auto width = std::min(size.cx + 2 * padding,
+                                    shortcut_monitor_work_.right - shortcut_monitor_work_.left - 2 * margin);
+        const auto height = size.cy + MulDiv(16, shortcut_dpi_, 96);
+        const auto left = shortcut_monitor_work_.left +
+                          (shortcut_monitor_work_.right - shortcut_monitor_work_.left - width) / 2;
+        shortcut_rect_ = {left - bounds_.left, shortcut_monitor_work_.bottom - margin - height - bounds_.top,
+                          left + width - bounds_.left, shortcut_monitor_work_.bottom - margin - bounds_.top};
+    }
     void prepare_shortcut_hint()
     {
         POINT point{};
@@ -105,25 +141,14 @@ class Selector
         MONITORINFO monitor{sizeof(monitor)};
         if (!GetMonitorInfoW(display, &monitor))
             return;
-        UINT dpi = GetDpiForWindow(window_), dpi_y{};
-        GetDpiForMonitor(display, MDT_EFFECTIVE_DPI, &dpi, &dpi_y);
-        shortcut_font_ = CreateFontW(-MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        shortcut_monitor_work_ = monitor.rcWork;
+        shortcut_dpi_ = GetDpiForWindow(window_);
+        UINT dpi_y{};
+        GetDpiForMonitor(display, MDT_EFFECTIVE_DPI, &shortcut_dpi_, &dpi_y);
+        shortcut_font_ = CreateFontW(-MulDiv(14, shortcut_dpi_, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        const auto dc = GetDC(window_);
-        const auto old = SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
-        SIZE size{};
-        constexpr wchar_t text[] = L"Press F2 to open settings";
-        GetTextExtentPoint32W(dc, text, static_cast<int>(std::size(text) - 1), &size);
-        SelectObject(dc, old);
-        ReleaseDC(window_, dc);
-        const auto margin = MulDiv(20, dpi, 96), padding = MulDiv(12, dpi, 96);
-        const auto width =
-            std::min(size.cx + 2 * padding, monitor.rcWork.right - monitor.rcWork.left - 2 * margin);
-        const auto height = size.cy + MulDiv(16, dpi, 96);
-        const auto left = monitor.rcWork.left + (monitor.rcWork.right - monitor.rcWork.left - width) / 2;
-        shortcut_rect_ = {left - bounds_.left, monitor.rcWork.bottom - margin - height - bounds_.top,
-                          left + width - bounds_.left, monitor.rcWork.bottom - margin - bounds_.top};
+        update_shortcut_rect();
     }
     void paint_shortcut_hint(HDC dc)
     {
@@ -133,18 +158,37 @@ class Selector
         const auto old_pen = SelectObject(dc, GetStockObject(DC_PEN));
         const auto old_font =
             SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
-        SetDCBrushColor(dc, RGB(18, 38, 32));
+        SetDCBrushColor(dc, edit_mode_ ? RGB(119, 244, 213) : RGB(18, 38, 32));
         SetDCPenColor(dc, RGB(55, 184, 173));
         RoundRect(dc, shortcut_rect_.left, shortcut_rect_.top, shortcut_rect_.right, shortcut_rect_.bottom, 8,
                   8);
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(208, 255, 241));
+        SetTextColor(dc, edit_mode_ ? RGB(8, 42, 36) : RGB(208, 255, 241));
         auto text = shortcut_rect_;
-        DrawTextW(dc, L"Press F2 to open settings", -1, &text,
-                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        DrawTextW(dc, shortcut_text(), -1, &text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
         SelectObject(dc, old_font);
         SelectObject(dc, old_pen);
         SelectObject(dc, old_brush);
+    }
+    void toggle_edit_mode()
+    {
+        if (opening_settings_ || closing_ || copying_)
+            return;
+        edit_mode_ = !edit_mode_;
+        const auto previous_pill = shortcut_rect_;
+        update_shortcut_rect();
+        if (dragging_)
+        {
+            auto selected = area();
+            InflateRect(&selected, 2, 2);
+            InvalidateRect(window_, &selected, FALSE);
+        }
+        else
+        {
+            RECT changed{};
+            UnionRect(&changed, &previous_pill, &shortcut_rect_);
+            InvalidateRect(window_, &changed, FALSE);
+        }
     }
     void open_settings()
     {
@@ -179,6 +223,7 @@ class Selector
     {
         escape_window_ = window_;
         settings_key_down_ = false;
+        edit_key_down_ = false;
         escape_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_procedure, GetModuleHandleW(nullptr), 0);
         if (!escape_hook_)
             escape_window_ = nullptr;
@@ -229,8 +274,19 @@ class Selector
         const auto selected = area();
         RECT changed{};
         UnionRect(&changed, &previous, &selected);
-        InflateRect(&changed, 1, 1);
+        InflateRect(&changed, 2, 2);
         InvalidateRect(window_, &changed, FALSE);
+    }
+    void open_editor(RECT selected)
+    {
+        copying_ = true;
+        // Image cropping can block this thread. Remove the hook before that work.
+        stop_escape_hook();
+        ShowWindow(window_, SW_HIDE);
+        edit_image_ = crop_bitmap(*image_, selected);
+        edit_screen_rect_ = {bounds_.left + selected.left, bounds_.top + selected.top,
+                             bounds_.left + selected.right, bounds_.top + selected.bottom};
+        finish();
     }
     void capture_selection(RECT selected)
     {
@@ -264,7 +320,17 @@ class Selector
                    selected.bottom - selected.top, image_->dc(), selected.left, selected.top, SRCCOPY);
             RECT border = selected;
             InflateRect(&border, 1, 1);
-            FrameRect(dc, &border, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            if (edit_mode_)
+            {
+                const auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
+                const auto previous_color = SetDCBrushColor(dc, RGB(119, 244, 213));
+                FrameRect(dc, &border, brush);
+                InflateRect(&border, 1, 1);
+                FrameRect(dc, &border, brush);
+                SetDCBrushColor(dc, previous_color);
+            }
+            else
+                FrameRect(dc, &border, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
         if (hint_)
         {
@@ -308,9 +374,16 @@ class Selector
                 finish();
             else if (w == VK_F2)
                 open_settings();
+            else if (w == 'E' && (l & (1 << 30)) == 0 && (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+                     (GetKeyState(VK_MENU) & 0x8000) == 0 && (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
+                     (GetKeyState(VK_RWIN) & 0x8000) == 0)
+                toggle_edit_mode();
             return 0;
         case OpenSettingsMessage:
             open_settings();
+            return 0;
+        case ToggleEditModeMessage:
+            toggle_edit_mode();
             return 0;
         case WM_RBUTTONDOWN:
         case WM_CLOSE:
@@ -352,7 +425,12 @@ class Selector
                 ReleaseCapture();
                 const auto selected = area();
                 if (has_area(selected))
-                    capture_selection(selected);
+                {
+                    if (edit_mode_)
+                        open_editor(selected);
+                    else
+                        capture_selection(selected);
+                }
                 InvalidateRect(window_, &shortcut_rect_, FALSE);
                 InvalidateRect(window_, nullptr, FALSE);
             }
@@ -382,6 +460,29 @@ class Selector
     }
     static LRESULT CALLBACK keyboard_procedure(int code, WPARAM w, LPARAM l) noexcept
     {
+        if (code == HC_ACTION && reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == 'E' &&
+            escape_window_ && IsWindowVisible(escape_window_))
+        {
+            if (w == WM_KEYUP || w == WM_SYSKEYUP)
+            {
+                if (edit_key_down_)
+                {
+                    edit_key_down_ = false;
+                    return 1;
+                }
+                return CallNextHookEx(nullptr, code, w, l);
+            }
+            const bool modified = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+            if (!modified && (w == WM_KEYDOWN || w == WM_SYSKEYDOWN))
+            {
+                if (!edit_key_down_)
+                    edit_key_down_ = PostMessageW(escape_window_, ToggleEditModeMessage, 0, 0) != FALSE;
+                return edit_key_down_ ? 1 : CallNextHookEx(nullptr, code, w, l);
+            }
+        }
         if (code == HC_ACTION && reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_F2 &&
             escape_window_ && IsWindowVisible(escape_window_))
         {
@@ -435,9 +536,9 @@ class Selector
     }
 };
 } // namespace
-int run_selector(HINSTANCE instance)
+SelectorResult run_selector(HINSTANCE instance)
 {
     Selector selector(instance);
-    return selector.run();
+    return selector.take_result(selector.run());
 }
 } // namespace pluck

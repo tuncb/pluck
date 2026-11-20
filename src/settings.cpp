@@ -1,6 +1,7 @@
 #include "settings.h"
 #include "management.h"
 #include "app_process.h"
+#include "theme.h"
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
@@ -39,7 +40,7 @@ class Settings
     HFONT normal{}, title{}, heading{};
     HICON brand_icon{};
     HBRUSH background{};
-    COLORREF canvas{}, ink{}, muted{}, line{}, accent{}, accent_ink{}, button{};
+    ThemePalette palette{};
     UINT dpi{96};
     bool installed{}, busy{}, close_requested{};
     management::Release release;
@@ -73,24 +74,11 @@ class Settings
     }
     void theme()
     {
-        DWORD light = 1, size = sizeof(light);
-        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
-        HIGHCONTRASTW contrast{sizeof(contrast)};
-        SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0);
-        const bool high = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-        canvas = high ? GetSysColor(COLOR_WINDOW) : light ? RGB(249, 252, 251) : RGB(12, 18, 17);
-        ink = high ? GetSysColor(COLOR_WINDOWTEXT) : light ? RGB(25, 42, 37) : RGB(237, 248, 244);
-        muted = high ? ink : light ? RGB(80, 101, 94) : RGB(158, 180, 172);
-        line = high ? ink : light ? RGB(215, 229, 222) : RGB(42, 59, 52);
-        accent = high ? GetSysColor(COLOR_HIGHLIGHT) : RGB(119, 244, 213);
-        accent_ink = high ? GetSysColor(COLOR_HIGHLIGHTTEXT) : RGB(8, 42, 36);
-        button = high ? canvas : light ? RGB(232, 242, 237) : RGB(28, 44, 37);
+        palette = read_theme();
         if (background)
             DeleteObject(background);
-        background = CreateSolidBrush(canvas);
-        const BOOL dark = !light && !high;
-        DwmSetWindowAttribute(window, 20, &dark, sizeof(dark));
+        background = CreateSolidBrush(palette.canvas);
+        apply_window_theme(window, palette);
         InvalidateRect(window, nullptr, TRUE);
         for (auto child : labels)
             InvalidateRect(child, nullptr, TRUE);
@@ -222,10 +210,10 @@ class Settings
         GetClientRect(window, &client);
         FillRect(dc, &ps.rcPaint, background);
         DrawIconEx(dc, px(32), py(33), brand_icon, px(48), px(48), 0, nullptr, DI_NORMAL);
-        text(dc, L"Pluck", {px(96), py(27), client.right - px(32), py(70)}, title, ink);
-        text(dc, L"Installation", {px(32), py(125), client.right - px(32), py(156)}, heading, ink);
-        text(dc, L"Updates", {px(32), py(270), client.right - px(32), py(301)}, heading, ink);
-        const auto pen = CreatePen(PS_SOLID, 1, line);
+        text(dc, L"Pluck", {px(96), py(27), client.right - px(32), py(70)}, title, palette.ink);
+        text(dc, L"Installation", {px(32), py(125), client.right - px(32), py(156)}, heading, palette.ink);
+        text(dc, L"Updates", {px(32), py(270), client.right - px(32), py(301)}, heading, palette.ink);
+        const auto pen = CreatePen(PS_SOLID, 1, palette.line);
         const auto previous = SelectObject(dc, pen);
         for (const auto y : {111, 258, 433})
         {
@@ -238,34 +226,8 @@ class Settings
     }
     void draw_button(const DRAWITEMSTRUCT& item)
     {
-        FillRect(item.hDC, &item.rcItem, background);
         const bool primary = item.CtlID == Install || item.CtlID == Update;
-        const bool disabled = (item.itemState & ODS_DISABLED) != 0;
-        const auto fill = CreateSolidBrush(primary && !disabled ? accent : button);
-        const auto pen = CreatePen(PS_SOLID, 1, primary && !disabled ? accent : line);
-        const auto old_brush = SelectObject(item.hDC, fill), old_pen = SelectObject(item.hDC, pen);
-        RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, px(8),
-                  px(8));
-        SelectObject(item.hDC, old_brush);
-        SelectObject(item.hDC, old_pen);
-        DeleteObject(fill);
-        DeleteObject(pen);
-        wchar_t label_text[128]{};
-        GetWindowTextW(item.hwndItem, label_text, 128);
-        const auto old_font = SelectObject(item.hDC, normal);
-        SetBkMode(item.hDC, TRANSPARENT);
-        SetTextColor(item.hDC, disabled ? muted : primary ? accent_ink : ink);
-        RECT text_rect = item.rcItem;
-        if (item.itemState & ODS_SELECTED)
-            OffsetRect(&text_rect, 0, px(1));
-        DrawTextW(item.hDC, label_text, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(item.hDC, old_font);
-        if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT))
-        {
-            RECT focus = item.rcItem;
-            InflateRect(&focus, -px(4), -px(4));
-            DrawFocusRect(item.hDC, &focus);
-        }
+        draw_theme_button(item, palette, background, normal, dpi, primary);
     }
     void start(int action)
     {
@@ -359,8 +321,8 @@ class Settings
         case WM_ERASEBKGND:
             return 1;
         case WM_CTLCOLORSTATIC:
-            SetTextColor(reinterpret_cast<HDC>(w), muted);
-            SetBkColor(reinterpret_cast<HDC>(w), canvas);
+            SetTextColor(reinterpret_cast<HDC>(w), palette.muted);
+            SetBkColor(reinterpret_cast<HDC>(w), palette.canvas);
             return reinterpret_cast<LRESULT>(background);
         case WM_DRAWITEM:
             draw_button(*reinterpret_cast<DRAWITEMSTRUCT*>(l));

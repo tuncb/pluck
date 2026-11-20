@@ -1,6 +1,11 @@
 #include "capture.h"
+#include "editor_core.h"
+#include <wincodec.h>
+#include <wrl/client.h>
 #include <cstdio>
+#include <filesystem>
 #include <stdexcept>
+#include <vector>
 
 namespace
 {
@@ -84,6 +89,109 @@ void pixels()
     require(pluck::copy_to_clipboard(nullptr, empty) == pluck::CopyResult::Failed,
             "Invalid clipboard owner was accepted.");
 }
+void editor_engine()
+{
+    pluck::Bitmap source(6, 5);
+    for (int y = 0; y < 5; ++y)
+        for (int x = 0; x < 6; ++x)
+            // Leave the top byte zero to mimic GDI BitBlt output.
+            source.pixels()[y * 6 + x] =
+                (static_cast<unsigned>(y * 40) << 16) | (static_cast<unsigned>(x * 30) << 8) | 0x5au;
+
+    auto cropped = pluck::crop_bitmap(source, {1, 2, 5, 5});
+    require(cropped && cropped->width() == 4 && cropped->height() == 3, "Cropped bitmap dimensions differ.");
+    for (int y = 0; y < 3; ++y)
+        for (int x = 0; x < 4; ++x)
+        {
+            const auto expected =
+                0xff000000u | (static_cast<unsigned>((y + 2) * 40) << 16) |
+                (static_cast<unsigned>((x + 1) * 30) << 8) | 0x5au;
+            require(cropped->pixels()[y * 4 + x] == expected,
+                    "Cropped bitmap pixels or opaque alpha normalization differ.");
+        }
+
+    rejects([&] { pluck::crop_bitmap(source, {-1, 0, 2, 2}); });
+    rejects([&] { pluck::crop_bitmap(source, {0, 0, 7, 2}); });
+    rejects([&] { pluck::crop_bitmap(source, {2, 2, 2, 4}); });
+    rejects([] { pluck::EditorDocument invalid(nullptr); });
+
+    SYSTEMTIME stamp{};
+    stamp.wYear = 2026;
+    stamp.wMonth = 11;
+    stamp.wDay = 20;
+    stamp.wHour = 9;
+    stamp.wMinute = 8;
+    stamp.wSecond = 7;
+    require(pluck::default_save_filename(stamp) == L"Pluck-2026-11-20-090807.png",
+            "Default PNG filename differs.");
+
+    pluck::EditorDocument document(std::move(cropped));
+    require(document.width() == 4 && document.height() == 3, "Document dimensions differ.");
+    auto dib = document.make_clipboard_dib();
+    auto* header = static_cast<BITMAPINFOHEADER*>(GlobalLock(dib.get()));
+    require(header && header->biWidth == 4 && header->biHeight == 3 && header->biBitCount == 24,
+            "Document clipboard DIB header differs.");
+    GlobalUnlock(dib.get());
+
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() /
+                      (L"pluck-core-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                       std::to_wstring(GetTickCount64()));
+    const auto png_path = root / L"nested" / L"capture.png";
+    try
+    {
+        document.save_png(png_path);
+        require(fs::exists(png_path) && fs::file_size(png_path) > 0, "PNG file was not created.");
+
+        const auto hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        require(SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE, "Cannot initialize WIC for test decode.");
+        struct Apartment
+        {
+            bool active{};
+            ~Apartment()
+            {
+                if (active)
+                    CoUninitialize();
+            }
+        } apartment{SUCCEEDED(hr)};
+
+        Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+        require(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                           IID_PPV_ARGS(&factory))),
+                "Cannot create WIC factory.");
+        Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+        require(SUCCEEDED(factory->CreateDecoderFromFilename(png_path.c_str(), nullptr, GENERIC_READ,
+                                                             WICDecodeMetadataCacheOnLoad, &decoder)),
+                "Cannot decode saved PNG.");
+        Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+        require(SUCCEEDED(decoder->GetFrame(0, &frame)), "Cannot read PNG frame.");
+        Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+        require(SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
+                    SUCCEEDED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA,
+                                                    WICBitmapDitherTypeNone, nullptr, 0.0,
+                                                    WICBitmapPaletteTypeCustom)),
+                "Cannot convert decoded PNG.");
+        UINT w{}, h{};
+        require(SUCCEEDED(converter->GetSize(&w, &h)) && w == 4 && h == 3, "Decoded PNG size differs.");
+        std::vector<std::uint32_t> decoded(static_cast<size_t>(w) * h);
+        require(SUCCEEDED(converter->CopyPixels(nullptr, w * 4, static_cast<UINT>(decoded.size() * 4),
+                                                reinterpret_cast<BYTE*>(decoded.data()))),
+                "Cannot read decoded PNG pixels.");
+        for (size_t i = 0; i < decoded.size(); ++i)
+            require(decoded[i] == document.render_output().pixels()[i],
+                    "Decoded PNG pixels or opacity differ from source.");
+
+        rejects([&] { document.save_png(L""); });
+    }
+    catch (...)
+    {
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
+}
 } // namespace
 int main()
 {
@@ -91,15 +199,18 @@ int main()
     {
         geometry();
         pixels();
+        editor_engine();
         // Make sure each capture buffer releases its bitmap and device context.
         const auto before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
         for (int i = 0; i < 200; ++i)
         {
             pluck::Bitmap image(3, 3);
-            auto dib = pluck::make_clipboard_dib(image, {0, 0, 3, 3});
+            auto cropped = pluck::crop_bitmap(image, {0, 0, 3, 3});
+            auto dib = pluck::make_clipboard_dib(*cropped, {0, 0, 3, 3});
         }
         require(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) == before, "GDI objects leaked.");
-        std::puts("PASS: rectangle geometry, pixel crops, DIB padding, invalid inputs, and GDI lifetime.");
+        std::puts("PASS: rectangle geometry, pixel crops, DIB padding, PNG export, invalid inputs, and GDI "
+                  "lifetime.");
         return 0;
     }
     catch (const std::exception& error)

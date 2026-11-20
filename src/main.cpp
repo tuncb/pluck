@@ -1,4 +1,5 @@
 #include "selector.h"
+#include "editor.h"
 #include "settings.h"
 #include "app_process.h"
 #include <cwchar>
@@ -49,16 +50,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int)
         CloseHandle(mutex);
         return 0;
     }
-    int result{};
+    pluck::SelectorResult selected{};
     try
     {
-        result = pluck::run_selector(instance);
+        selected = pluck::run_selector(instance);
     }
     catch (const std::exception& error)
     {
         MessageBoxA(nullptr, error.what(), "Pluck", MB_OK | MB_ICONERROR);
-        result = 1;
+        selected.exit_code = 1;
     }
+    // Release the capture lock before opening the editor so new captures can start.
     CloseHandle(mutex);
-    return result;
+    if (selected.exit_code == 0 && selected.edit_image)
+    {
+        try
+        {
+            return pluck::run_editor(instance, std::move(selected.edit_image), selected.selection_screen_rect);
+        }
+        catch (const std::exception& error)
+        {
+            MessageBoxA(nullptr, error.what(), "Pluck Editor", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+    }
+    return selected.exit_code;
 }

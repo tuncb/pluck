@@ -64,6 +64,24 @@ std::unique_ptr<Bitmap> capture_desktop(RECT bounds)
     return image;
 }
 
+std::unique_ptr<Bitmap> crop_bitmap(const Bitmap& source, RECT crop)
+{
+    if (!has_area(crop) || crop.left < 0 || crop.top < 0 || crop.right > source.width() ||
+        crop.bottom > source.height())
+        throw std::runtime_error("The selected area is outside the screenshot.");
+    const int width = crop.right - crop.left;
+    const int height = crop.bottom - crop.top;
+    auto result = std::make_unique<Bitmap>(width, height);
+    for (int y = 0; y < height; ++y)
+    {
+        const auto* input = source.pixels() + static_cast<size_t>(crop.top + y) * source.width() + crop.left;
+        auto* output = result->pixels() + static_cast<size_t>(y) * width;
+        for (int x = 0; x < width; ++x)
+            output[x] = 0xff000000u | (input[x] & 0x00ffffffu);
+    }
+    return result;
+}
+
 GlobalMemory make_clipboard_dib(const Bitmap& source, RECT crop)
 {
     if (!has_area(crop) || crop.left < 0 || crop.top < 0 || crop.right > source.width() ||

@@ -9,9 +9,18 @@ A small Windows screenshot app. A companion to [Yoink](https://github.com/tuncb/
 Paste the image into an app that accepts images. Press **Escape** or **right-click**
 to cancel. A click without a drag does not copy an image.
 
+Press **E** before or during selection to turn on **edit mode**. The shortcut hint
+and selection border switch to mint while edit mode is active. Press **E** again to
+turn edit mode off. When you release the mouse button in edit mode, Pluck opens the
+captured image in **Pluck Editor** instead of copying it immediately. In the editor:
+
+- Select **Copy** (or press **Ctrl+C**) to copy the image to the clipboard and close.
+- Select **Save PNG** (or press **Ctrl+S**) to save the image as a PNG file and close.
+- Press **Escape** or close the window to discard the capture without changing the clipboard.
+
 Press **F2** before or during selection to open **Pluck Settings**. This cancels
 selection and preserves the clipboard. Settings runs in a separate process.
-The small F2 hint appears at the bottom of the display under the pointer. It hides
+The small shortcut hint appears at the bottom of the display under the pointer. It hides
 when you press the mouse button and is never part of the copied image.
 
 ## Settings, installation, and updates

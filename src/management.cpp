@@ -129,15 +129,26 @@ void wait_for_capture()
     for (;;)
     {
         Handle capture(OpenMutexW(SYNCHRONIZE, FALSE, CaptureMutex));
-        if (!capture.value)
+        if (capture.value)
         {
-            if (GetLastError() == ERROR_FILE_NOT_FOUND)
-                return;
-            throw std::runtime_error("Cannot check the active capture.");
+            if (GetTickCount64() >= deadline)
+                throw std::runtime_error("Finish the current capture, then try the update again.");
+            Sleep(50);
+            continue;
         }
-        if (GetTickCount64() >= deadline)
-            throw std::runtime_error("Finish the current capture, then try the update again.");
-        Sleep(50);
+        if (GetLastError() != ERROR_FILE_NOT_FOUND)
+            throw std::runtime_error("Cannot check the active capture.");
+        Handle editor(OpenMutexW(SYNCHRONIZE, FALSE, EditorMutex));
+        if (editor.value)
+        {
+            if (GetTickCount64() >= deadline)
+                throw std::runtime_error("Close the editor window, then try the update again.");
+            Sleep(50);
+            continue;
+        }
+        if (GetLastError() != ERROR_FILE_NOT_FOUND)
+            throw std::runtime_error("Cannot check the active editor.");
+        return;
     }
 }
 void clean_job(const fs::path& job)
