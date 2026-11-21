@@ -6,7 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $version = Get-PluckVersion
 $native = Get-PluckNativeImage (Join-Path $root 'artifacts/win-x64/Pluck.exe')
 foreach ($dependency in $native.Imports) {
-    if ($dependency -match '^(winhttp|bcrypt|ole32|oleaut32|combase|d2d1|windowscodecs|shcore|api-ms-win-shcore.*|api-ms-win-core-com.*|api-ms-win-core-winrt.*)\.dll$') {
+    if ($dependency -match '^(winhttp|bcrypt|ole32|oleaut32|combase|d2d1|dwrite|windowscodecs|shcore|api-ms-win-shcore.*|api-ms-win-core-com.*|api-ms-win-core-winrt.*)\.dll$') {
         throw "The capture startup loads a management, scaling, or editor dependency: $dependency"
     }
     if ($dependency -match '^api-ms-win-core-.*\.dll$') {
@@ -15,6 +15,7 @@ foreach ($dependency in $native.Imports) {
 }
 if ($native.DelayImports -notcontains 'winhttp.dll') { throw 'The updater must load WinHTTP only on request.' }
 if ($native.DelayImports -notcontains 'd2d1.dll') { throw 'The editor must load Direct2D only on request.' }
+if ($native.DelayImports -notcontains 'dwrite.dll') { throw 'The editor must load DirectWrite only on request.' }
 if ($native.DelayImports -notcontains 'api-ms-win-shcore-scaling-l1-1-1.dll' -and $native.DelayImports -notcontains 'shcore.dll') {
     throw 'Monitor DPI scaling must load SHCore only on request.'
 }

@@ -14,9 +14,15 @@ and selection border switch to mint while edit mode is active. Press **E** again
 turn edit mode off. When you release the mouse button in edit mode, Pluck opens the
 captured image in **Pluck Editor** instead of copying it immediately. In the editor:
 
+- Draw movable vector markup from the top bar: **Select** (**V**), **Pen** (**P**), **Highlighter** (**H**), **Arrow** (**A**), **Rectangle** (**R**), **Oval** (**O**), **Line** (**L**), **Text** (**T**), **Step number** (**N**), **Redact / Pixelate** (**B**), and non-destructive **Crop** (**C**).
+- Hold **Shift** to draw straight pen or highlighter lines, 45° arrows or lines, or square and circular shapes.
+- Pick colors, stroke sizes (**[** / **]**), shape fill, text background, or pixelate/solid redaction in the second toolbar row. Double-click text to edit it in place.
+- Zoom with **Ctrl+Wheel**, **+**, **-**, **0** (fit), and **1** (100%). Pan with **Space+Drag** or the middle mouse button.
+- Use **Ctrl+Z** and **Ctrl+Y** to undo and redo markup or crop changes. Use **Reset** to clear all edits, or press **Delete** to remove a selected item.
+- Press **Escape** to switch from a tool to **Select / Move**, finish text editing, cancel crop, or deselect an item.
 - Select **Copy** (or press **Ctrl+C**) to copy the image to the clipboard.
 - Select **Save PNG** (or press **Ctrl+S**) to save the image as a PNG file.
-- Press **Escape** or close the window when you finish. Closing without copying preserves the clipboard.
+- Close the window when you finish. Closing without copying preserves the clipboard.
 
 Press **F2** before or during selection to open **Pluck Settings**. This cancels
 selection and preserves the clipboard. Settings runs in a separate process.

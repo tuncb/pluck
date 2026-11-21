@@ -254,6 +254,249 @@ void editor_engine()
     std::error_code ignored;
     fs::remove_all(root, ignored);
 }
+void editor_markup()
+{
+    // Geometry constraints
+    {
+        const auto snapped = pluck::constrain_angle_45({10.0f, 10.0f}, {110.0f, 14.0f});
+        require(std::abs(snapped.y - 10.0f) < 0.01f && snapped.x > 100.0f,
+                "45-degree angle snap failed for horizontal stroke.");
+        const auto sq = pluck::constrain_square({10.0f, 20.0f}, {60.0f, 35.0f});
+        require(std::abs((sq.x - 10.0f) - (sq.y - 20.0f)) < 0.01f, "Square constraint failed.");
+    }
+
+    // Light background with a solid black horizontal bar to test text-safe multiply highlighting
+    auto make_light_canvas = []()
+    {
+        auto bmp = std::make_unique<pluck::Bitmap>(160, 120);
+        for (int y = 0; y < 120; ++y)
+            for (int x = 0; x < 160; ++x)
+                bmp->pixels()[y * 160 + x] =
+                    (y >= 48 && y < 52 && x >= 20 && x < 140) ? 0xff000000u : 0xffffffffu;
+        return bmp;
+    };
+
+    {
+        pluck::EditorDocument doc(make_light_canvas());
+        pluck::Annotation hl{};
+        hl.kind = pluck::AnnotationKind::Highlighter;
+        hl.color = pluck::DefaultHighlighterColor;
+        hl.size = pluck::SizePreset::Medium;
+        hl.points = {{20.0f, 50.0f}, {140.0f, 50.0f}};
+        const auto hl_id = doc.add_annotation(hl);
+        require(hl_id != 0, "Highlighter annotation id was zero.");
+        const auto& out = doc.render_output();
+        const auto white_bg_px = out.pixels()[44 * 160 + 80];
+        const auto black_bar_px = out.pixels()[50 * 160 + 80];
+        const unsigned bg_r = (white_bg_px >> 16) & 255u;
+        const unsigned bg_b = white_bg_px & 255u;
+        require(bg_r > 230u && bg_b < 140u, "Yellow highlighter did not tint light background.");
+        const unsigned bar_r = (black_bar_px >> 16) & 255u;
+        const unsigned bar_g = (black_bar_px >> 8) & 255u;
+        const unsigned bar_b = black_bar_px & 255u;
+        require(bar_r == 0u && bar_g == 0u && bar_b == 0u,
+                "Highlighter washed out black text pixels on a light background.");
+    }
+
+    // Dark background highlighter should visibly brighten/tint dark UI pixels
+    {
+        auto dark = std::make_unique<pluck::Bitmap>(120, 80);
+        for (int i = 0; i < 120 * 80; ++i)
+            dark->pixels()[i] = 0xff141414u;
+        pluck::EditorDocument doc(std::move(dark));
+        pluck::Annotation hl{};
+        hl.kind = pluck::AnnotationKind::Highlighter;
+        hl.color = pluck::DefaultHighlighterColor;
+        hl.size = pluck::SizePreset::Medium;
+        hl.points = {{20.0f, 40.0f}, {100.0f, 40.0f}};
+        doc.add_annotation(hl);
+        const auto& out = doc.render_output();
+        const auto px = out.pixels()[40 * 120 + 60];
+        require(((px >> 16) & 255u) > 80u, "Highlighter was invisible on dark background.");
+    }
+
+    // Pixelate redaction averages checkerboard blocks and leaves exterior untouched
+    {
+        auto checker = std::make_unique<pluck::Bitmap>(120, 120);
+        for (int y = 0; y < 120; ++y)
+            for (int x = 0; x < 120; ++x)
+                checker->pixels()[y * 120 + x] = ((x + y) & 1) ? 0xffffffffu : 0xff000000u;
+        pluck::EditorDocument doc(std::move(checker));
+        pluck::Annotation redact{};
+        redact.kind = pluck::AnnotationKind::Redact;
+        redact.size = pluck::SizePreset::Small; // 8px block
+        redact.filled = false;
+        redact.start = {16.0f, 16.0f};
+        redact.end = {64.0f, 64.0f};
+        const auto id = doc.add_annotation(redact);
+        const auto& out = doc.render_output();
+        const auto inside0 = out.pixels()[16 * 120 + 16];
+        const auto inside1 = out.pixels()[16 * 120 + 17];
+        require(inside0 == inside1, "Pixelate block did not unify adjacent checkerboard pixels.");
+        const unsigned ch = inside0 & 255u;
+        require(ch >= 120u && ch <= 136u, "Pixelate average brightness differs from expected midpoint.");
+        require(out.pixels()[2 * 120 + 2] == 0xff000000u && out.pixels()[2 * 120 + 3] == 0xffffffffu,
+                "Pixelate modified pixels outside its rectangle.");
+
+        // Switch redact to solid mode and verify undo/redo
+        require(doc.update_annotation_style(id, RGB(16, 32, 48), pluck::SizePreset::Small, true),
+                "Failed to switch redact to solid.");
+        const auto& solid_out = doc.render_output();
+        require((solid_out.pixels()[24 * 120 + 24] & 0x00ffffffu) == 0x00102030u,
+                "Solid redact did not fill with the selected color.");
+        require(doc.undo(), "Undo of redact style failed.");
+        require(doc.render_output().pixels()[24 * 120 + 24] == inside0,
+                "Undo did not restore pixelated output.");
+        require(doc.redo(), "Redo of redact style failed.");
+        require((doc.render_output().pixels()[24 * 120 + 24] & 0x00ffffffu) == 0x00102030u,
+                "Redo did not restore solid redact output.");
+    }
+
+    // All vector markup types, hit-testing, move, resize, step counter, non-destructive crop, and PNG export
+    {
+        auto canvas = std::make_unique<pluck::Bitmap>(200, 160);
+        for (int i = 0; i < 200 * 160; ++i)
+            canvas->pixels()[i] = 0xffffffffu;
+        pluck::EditorDocument doc(std::move(canvas));
+
+        pluck::Annotation pen{};
+        pen.kind = pluck::AnnotationKind::Pen;
+        pen.color = RGB(239, 68, 68);
+        pen.size = pluck::SizePreset::Large;
+        pen.points = {{15.0f, 20.0f}, {55.0f, 20.0f}};
+        const auto pen_id = doc.add_annotation(pen);
+
+        pluck::Annotation arrow{};
+        arrow.kind = pluck::AnnotationKind::Arrow;
+        arrow.color = RGB(59, 130, 246);
+        arrow.size = pluck::SizePreset::Medium;
+        arrow.start = {20.0f, 50.0f};
+        arrow.end = {120.0f, 50.0f};
+        const auto arrow_id = doc.add_annotation(arrow);
+
+        pluck::Annotation rect{};
+        rect.kind = pluck::AnnotationKind::Rectangle;
+        rect.color = RGB(16, 185, 129);
+        rect.size = pluck::SizePreset::Medium;
+        rect.filled = true;
+        rect.start = {30.0f, 70.0f};
+        rect.end = {90.0f, 110.0f};
+        const auto rect_id = doc.add_annotation(rect);
+
+        pluck::Annotation oval{};
+        oval.kind = pluck::AnnotationKind::Oval;
+        oval.color = RGB(168, 85, 247);
+        oval.size = pluck::SizePreset::Medium;
+        oval.filled = false;
+        oval.start = {110.0f, 70.0f};
+        oval.end = {170.0f, 110.0f};
+        const auto oval_id = doc.add_annotation(oval);
+
+        pluck::Annotation line{};
+        line.kind = pluck::AnnotationKind::Line;
+        line.color = RGB(24, 24, 27);
+        line.size = pluck::SizePreset::Medium;
+        line.start = {20.0f, 130.0f};
+        line.end = {100.0f, 130.0f};
+        const auto line_id = doc.add_annotation(line);
+
+        pluck::Annotation text{};
+        text.kind = pluck::AnnotationKind::Text;
+        text.color = RGB(239, 68, 68);
+        text.size = pluck::SizePreset::Medium;
+        text.filled = true;
+        text.start = {120.0f, 122.0f};
+        text.text = L"Note";
+        const auto text_id = doc.add_annotation(text);
+
+        pluck::Annotation step1{};
+        step1.kind = pluck::AnnotationKind::Step;
+        step1.color = RGB(239, 68, 68);
+        step1.size = pluck::SizePreset::Medium;
+        step1.start = {160.0f, 30.0f};
+        step1.step_number = 0; // auto-assign 1
+        const auto step1_id = doc.add_annotation(step1);
+        require(doc.find_annotation(step1_id)->step_number == 1 && doc.next_step_number() == 2,
+                "Step counter did not auto-increment.");
+        doc.reset_step_number();
+        require(doc.next_step_number() == 1, "Step counter reset failed.");
+
+        // Hit-testing & handle detection
+        require(doc.hit_test({35.0f, 20.0f}, 4.0f) == pen_id, "Pen hit-test failed.");
+        require(doc.hit_test({70.0f, 50.0f}, 4.0f) == arrow_id, "Arrow hit-test failed.");
+        require(doc.hit_test({60.0f, 90.0f}, 4.0f) == rect_id, "Filled rectangle hit-test failed.");
+        require(doc.hit_test({140.0f, 70.0f}, 5.0f) == oval_id, "Oval edge hit-test failed.");
+        require(doc.hit_test({60.0f, 130.0f}, 4.0f) == line_id, "Line hit-test failed.");
+        require(doc.hit_test({135.0f, 132.0f}, 4.0f) == text_id, "Text hit-test failed.");
+        require(doc.hit_test({160.0f, 30.0f}, 4.0f) == step1_id, "Step badge hit-test failed.");
+        require(pluck::hit_test_handles(*doc.find_annotation(arrow_id), {120.0f, 50.0f}, 8.0f) ==
+                    pluck::HandleKind::End,
+                "Arrow end handle hit-test failed.");
+
+        // Move + commit_mutation + undo
+        doc.begin_mutation();
+        pluck::translate_annotation(*doc.find_annotation_mutable(step1_id), 10.0f, 5.0f);
+        doc.commit_mutation();
+        require(doc.find_annotation(step1_id)->start.x == 170.0f &&
+                    doc.find_annotation(step1_id)->start.y == 35.0f,
+                "Translate annotation failed.");
+        require(doc.undo(), "Undo after translate failed.");
+        require(doc.find_annotation(step1_id)->start.x == 160.0f, "Undo did not restore position.");
+
+        // Render output verifies marks changed pixels
+        const auto& full_out = doc.render_output();
+        require(full_out.pixels()[20 * 200 + 35] != 0xffffffffu, "Pen stroke did not render.");
+        require(full_out.pixels()[50 * 200 + 70] != 0xffffffffu, "Arrow did not render.");
+        require(full_out.pixels()[90 * 200 + 60] != 0xffffffffu, "Filled rectangle did not render.");
+        require(full_out.pixels()[130 * 200 + 60] != 0xffffffffu, "Line did not render.");
+        require(full_out.pixels()[30 * 200 + 160] != 0xffffffffu, "Step badge did not render.");
+        const auto text_bounds = pluck::annotation_bounds(*doc.find_annotation(text_id));
+        const int pad_x = std::clamp(static_cast<int>(text.start.x - 5.0f), 0, 199);
+        const int pad_y = std::clamp(static_cast<int>(text.start.y + 6.0f), 0, 159);
+        const auto badge_px = full_out.pixels()[pad_y * 200 + pad_x];
+        require(((badge_px >> 16) & 255u) > 200u && (badge_px & 255u) < 100u,
+                "Text badge background did not render.");
+        int white_glyph_pixels = 0;
+        const int bx0 = std::clamp(static_cast<int>(text.start.x), 0, 199);
+        const int by0 = std::clamp(static_cast<int>(text.start.y), 0, 159);
+        const int bx1 = std::clamp(static_cast<int>(text_bounds.right - 10.0f), 0, 199);
+        const int by1 = std::clamp(static_cast<int>(text_bounds.bottom - 5.0f), 0, 159);
+        for (int y = by0; y < by1; ++y)
+            for (int x = bx0; x < bx1; ++x)
+            {
+                const auto p = full_out.pixels()[y * 200 + x];
+                if (((p >> 16) & 255u) > 220u && ((p >> 8) & 255u) > 200u && (p & 255u) > 200u)
+                    ++white_glyph_pixels;
+            }
+        require(white_glyph_pixels > 10, "Text badge glyphs did not render.");
+
+        // Non-destructive crop preserves annotations in cropped coordinates and undoes cleanly
+        require(doc.set_crop_rect({20, 40, 140, 120}), "Set crop failed.");
+        require(doc.is_cropped() && doc.width() == 120 && doc.height() == 80,
+                "Cropped document dimensions differ.");
+        const auto& cropped_out = doc.render_output();
+        require(cropped_out.width() == 120 && cropped_out.height() == 80,
+                "Cropped rendered bitmap size differs.");
+        // Arrow was at y=50, x=70 in full image -> y=10, x=50 in cropped image
+        require(cropped_out.pixels()[10 * 120 + 50] != 0xffffffffu,
+                "Annotation did not align after non-destructive crop.");
+        require(doc.undo(), "Undo crop failed.");
+        require(!doc.is_cropped() && doc.width() == 200 && doc.height() == 160,
+                "Undo did not restore full uncropped size.");
+
+        // Grouped erase + Clear + Reset all + Undo
+        require(doc.delete_annotations({pen_id, line_id}), "Grouped delete failed.");
+        require(doc.annotations().size() == 5, "Grouped delete count differs.");
+        require(doc.set_crop_rect({10, 10, 150, 130}), "Crop before reset failed.");
+        require(doc.reset_all() && doc.annotations().empty() && !doc.is_cropped(), "Reset all failed.");
+        require(doc.undo() && doc.annotations().size() == 5 && doc.is_cropped(),
+                "Undo reset all did not restore annotations and crop.");
+        require(doc.undo() && !doc.is_cropped(), "Undo crop failed.");
+        require(doc.clear_annotations() && doc.annotations().empty(), "Clear annotations failed.");
+        require(doc.undo() && doc.annotations().size() == 5, "Undo clear failed.");
+        require(doc.undo() && doc.annotations().size() == 7, "Undo grouped delete failed.");
+    }
+}
 } // namespace
 int main()
 {
@@ -263,6 +506,7 @@ int main()
         pixels();
         dimming();
         editor_engine();
+        editor_markup();
         // Make sure each capture buffer releases its bitmap and device context.
         const auto before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
         for (int i = 0; i < 200; ++i)

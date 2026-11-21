@@ -309,6 +309,14 @@ void edit_key()
     input[1].ki.dwFlags = KEYEVENTF_KEYUP;
     require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send E.");
 }
+void send_vk(WORD key)
+{
+    INPUT input[2]{};
+    input[0].type = input[1].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = input[1].ki.wVk = key;
+    input[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send key input.");
+}
 void ctrl_key(WORD key)
 {
     INPUT input[4]{};
@@ -702,9 +710,7 @@ int wmain(int count, wchar_t** arguments)
             require(IsWindow(editor) && IsWindowVisible(editor),
                     "Ctrl+C closed the editor window.");
             verify_image(fixture);
-            SetForegroundWindow(editor);
-            pump(50);
-            escape();
+            PostMessageW(editor, WM_CLOSE, 0, 0);
             child.exited();
             verify_image(fixture);
         }
@@ -738,14 +744,12 @@ int wmain(int count, wchar_t** arguments)
             require(IsWindow(editor) && IsWindowVisible(editor),
                     "Clipboard retry copy closed the editor window.");
             verify_image(fixture);
-            SetForegroundWindow(editor);
-            pump(50);
-            escape();
+            PostMessageW(editor, WM_CLOSE, 0, 0);
             child.exited();
             verify_image(fixture);
         }
         {
-            // Mode 2: E without foreground focus does not leak to the background app, and Esc closes the editor.
+            // Mode 2: E without foreground focus does not leak to the background app, and Esc does not close editor.
             marker(fixture);
             const auto sequence = GetClipboardSequenceNumber();
             const auto presses = fixture_edit_presses;
@@ -762,8 +766,13 @@ int wmain(int count, wchar_t** arguments)
             SetForegroundWindow(editor);
             pump(50);
             escape();
+            pump(80);
+            escape();
+            pump(80);
+            require(IsWindow(editor) && IsWindowVisible(editor), "Esc closed the editor window.");
+            PostMessageW(editor, WM_CLOSE, 0, 0);
             child.exited();
-            require(GetClipboardSequenceNumber() == sequence, "Esc in the editor changed the clipboard.");
+            require(GetClipboardSequenceNumber() == sequence, "Closing editor without copy changed the clipboard.");
         }
         {
             // Mode 3: Pressing E twice cancels edit mode and restores direct copy-and-exit.
@@ -780,8 +789,99 @@ int wmain(int count, wchar_t** arguments)
                     "Toggling edit mode off still opened the editor.");
             verify_image(fixture);
         }
+        {
+            // Mode 4: Draw markup in the editor, copy modified pixels, save screenshot, undo back to exact base.
+            marker(fixture);
+            SetForegroundWindow(fixture);
+            Child child(arguments[1]);
+            edit_key();
+            pump(60);
+            mouse(a, MOUSEEVENTF_LEFTDOWN);
+            mouse(b, MOUSEEVENTF_LEFTUP);
+            const auto editor = wait_for_editor(child.process.dwProcessId);
+            SetForegroundWindow(editor);
+            pump(80);
+            const auto canvas = FindWindowExW(editor, nullptr, L"Pluck.Native.EditorCanvas", nullptr);
+            require(canvas != nullptr, "Editor canvas child window was not created.");
+            RECT canvas_rect{};
+            GetWindowRect(canvas, &canvas_rect);
+            const POINT center{(canvas_rect.left + canvas_rect.right) / 2,
+                               (canvas_rect.top + canvas_rect.bottom) / 2};
+
+            // Draw a red rectangle across the 100x80 captured image centered in the canvas.
+            send_vk('R');
+            pump(40);
+            mouse({center.x - 42, center.y - 32}, MOUSEEVENTF_LEFTDOWN);
+            mouse({center.x + 42, center.y + 32}, 0);
+            mouse({center.x + 42, center.y + 32}, MOUSEEVENTF_LEFTUP);
+            pump(60);
+
+            // Also stamp a step badge at the top-left of the image so the visual artifact shows both.
+            send_vk('N');
+            pump(40);
+            mouse({center.x - 24, center.y - 16}, MOUSEEVENTF_LEFTDOWN);
+            mouse({center.x - 24, center.y - 16}, MOUSEEVENTF_LEFTUP);
+            pump(80);
+
+            RECT editor_bounds{};
+            GetWindowRect(editor, &editor_bounds);
+            const auto annotated_shot = pluck::capture_desktop(editor_bounds);
+            save_bitmap(*annotated_shot, std::wstring(arguments[2]) + L"/editor-annotated.bmp");
+
+            const auto seq_before_copy = GetClipboardSequenceNumber();
+            ctrl_key('C');
+            const auto copy_deadline = GetTickCount64() + 3000;
+            while (GetClipboardSequenceNumber() == seq_before_copy)
+            {
+                require(GetTickCount64() < copy_deadline, "Ctrl+C with markup did not copy.");
+                pump(10);
+            }
+            // Verify the copied pixels differ from the unedited base fixture.
+            bool changed = false;
+            open_clipboard(fixture);
+            if (const auto mem = GetClipboardData(CF_DIB))
+            {
+                const auto* hdr = static_cast<BITMAPINFOHEADER*>(GlobalLock(mem));
+                require(hdr && hdr->biWidth == 100 && hdr->biHeight == 80,
+                        "Annotated clipboard image dimensions differ.");
+                const auto* bytes = reinterpret_cast<const unsigned char*>(hdr + 1);
+                for (int y = 0; y < 80 && !changed; ++y)
+                    for (int x = 0; x < 100 && !changed; ++x)
+                    {
+                        const auto* p = bytes + (79 - y) * 300 + x * 3;
+                        const bool red = x >= 20 && x < 80 && y >= 20 && y < 60;
+                        if (p[0] != (red ? 64 : 192) || p[1] != (red ? 48 : 96) || p[2] != (red ? 224 : 32))
+                            changed = true;
+                    }
+                GlobalUnlock(mem);
+            }
+            CloseClipboard();
+            require(changed, "Annotated editor copy did not contain drawn markup.");
+
+            // Undo both annotations and verify Ctrl+C restores the exact untouched capture pixels.
+            ctrl_key('Z');
+            pump(40);
+            ctrl_key('Z');
+            pump(60);
+            const auto seq_undo_copy = GetClipboardSequenceNumber();
+            ctrl_key('C');
+            const auto undo_deadline = GetTickCount64() + 3000;
+            while (GetClipboardSequenceNumber() == seq_undo_copy)
+            {
+                require(GetTickCount64() < undo_deadline, "Ctrl+C after undo did not copy.");
+                pump(10);
+            }
+            verify_image(fixture);
+
+            // Escape switches to Select/Move and keeps the editor open; WM_CLOSE exits cleanly.
+            escape();
+            pump(60);
+            require(IsWindow(editor) && IsWindowVisible(editor), "Esc closed the editor window.");
+            PostMessageW(editor, WM_CLOSE, 0, 0);
+            child.exited();
+        }
         std::puts("PASS: edit mode (E before/during drag, without focus, toggle off, concurrent capture, "
-                  "Ctrl+C copy + retry, and Esc close).");
+                  "markup draw/undo, Esc to select, Ctrl+C copy + retry, and window close).");
         std::vector<double> times;
         for (int direction = 0; direction < 4; ++direction)
         {
