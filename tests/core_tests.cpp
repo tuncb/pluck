@@ -1,10 +1,13 @@
 #include "capture.h"
 #include "editor_core.h"
+#include "selector.h"
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -521,6 +524,108 @@ void editor_markup()
         require(doc.undo() && doc.annotations().size() == 7, "Undo grouped delete failed.");
     }
 }
+void selector_hints()
+{
+    using std::wstring_view;
+    require(wstring_view(pluck::selector_shortcut_text(false, false)) ==
+                L"Tab for window  \u00b7  E for Edit  \u00b7  F2 for settings",
+            "Area mode shortcut text differs.");
+    require(wstring_view(pluck::selector_shortcut_text(false, true)) ==
+                L"Tab for window  \u00b7  E for Edit Off  \u00b7  F2 for settings",
+            "Area + edit mode shortcut text differs.");
+    require(wstring_view(pluck::selector_shortcut_text(true, false)) ==
+                L"Tab for area  \u00b7  E for Edit  \u00b7  F2 for settings",
+            "Window mode shortcut text differs.");
+    require(wstring_view(pluck::selector_shortcut_text(true, true)) ==
+                L"Tab for area  \u00b7  E for Edit Off  \u00b7  F2 for settings",
+            "Window + edit mode shortcut text differs.");
+    require(wstring_view(pluck::selector_copy_error_text(false)) ==
+                L"Cannot copy. Drag to try again, or press Esc to cancel.",
+            "Area mode copy error text differs.");
+    require(wstring_view(pluck::selector_copy_error_text(true)) ==
+                L"Cannot copy. Click a window to try again, or press Esc to cancel.",
+            "Window mode copy error text differs.");
+
+    // Pill layout: centered near monitor work-area bottom, offset into virtual desktop coordinates.
+    const RECT desktop{-1920, 0, 1920, 1080};
+    const RECT left_work{-1920, 0, 0, 1040};
+    const RECT pill = pluck::selector_shortcut_rect(left_work, desktop, {300, 18}, 96);
+    const RECT want_pill{798, 986, 1122, 1020};
+    require(EqualRect(&pill, &want_pill), "Selector shortcut pill layout differs at 96 DPI.");
+
+    // DPI scaling (192 DPI = 2x): margin 40, padding 24, height + 32.
+    const RECT hidpi_pill = pluck::selector_shortcut_rect({0, 0, 3840, 2100}, {0, 0, 3840, 2100}, {600, 36}, 192);
+    const RECT want_hidpi{1596, 1992, 2244, 2060};
+    require(EqualRect(&hidpi_pill, &want_hidpi), "Selector shortcut pill layout differs at 192 DPI.");
+
+    // Narrow monitor clamps pill width inside margins; empty work area returns empty rect.
+    const RECT narrow = pluck::selector_shortcut_rect({0, 0, 200, 400}, {0, 0, 200, 400}, {300, 18}, 96);
+    require(narrow.left == 20 && narrow.right == 180 && narrow.bottom == 380,
+            "Selector shortcut pill did not clamp to narrow monitor.");
+    require(!pluck::has_area(pluck::selector_shortcut_rect({}, desktop, {300, 18}, 96)),
+            "Empty monitor work area produced a non-empty shortcut rect.");
+
+    // Visibility rules.
+    require(pluck::selector_shortcut_visible(false, false, false, false, false, pill),
+            "Idle selector shortcut pill should be visible.");
+    require(!pluck::selector_shortcut_visible(true, false, false, false, false, pill),
+            "Shortcut pill should hide while dragging.");
+    require(!pluck::selector_shortcut_visible(false, true, false, false, false, pill),
+            "Shortcut pill should hide while clicking a window.");
+    require(!pluck::selector_shortcut_visible(false, false, true, false, false, pill),
+            "Shortcut pill should hide while copying.");
+    require(!pluck::selector_shortcut_visible(false, false, false, true, false, pill),
+            "Shortcut pill should hide while closing.");
+    require(!pluck::selector_shortcut_visible(false, false, false, false, true, pill),
+            "Shortcut pill should hide when an error hint is active.");
+    require(!pluck::selector_shortcut_visible(false, false, false, false, false, {}),
+            "Shortcut pill should hide when its rect is empty.");
+
+    // Off-screen GDI paint check for all four states (works on headless and isolated desktops).
+    const auto font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
+                                  L"Segoe UI");
+    require(font != nullptr, "Cannot create test font for selector shortcut pill.");
+    const auto to_bgra_rgb = [](COLORREF c) noexcept -> std::uint32_t
+    {
+        return (static_cast<std::uint32_t>(GetRValue(c)) << 16) |
+               (static_cast<std::uint32_t>(GetGValue(c)) << 8) | static_cast<std::uint32_t>(GetBValue(c));
+    };
+    const auto fill_idle = to_bgra_rgb(pluck::SelectorShortcutFill);
+    const auto fill_edit = to_bgra_rgb(pluck::SelectorShortcutEditFill);
+    const auto border_rgb = to_bgra_rgb(pluck::SelectorShortcutBorder);
+    for (bool window_mode : {false, true})
+    {
+        for (bool edit_mode : {false, true})
+        {
+            pluck::Bitmap canvas(520, 64);
+            std::fill_n(canvas.pixels(), static_cast<size_t>(canvas.width()) * canvas.height(), 0xff000000u);
+            const RECT box{20, 14, 500, 50};
+            pluck::paint_selector_shortcut_pill(canvas.dc(), box, font, window_mode, edit_mode);
+            const auto expected_fill = edit_mode ? fill_edit : fill_idle;
+            size_t fill_pixels{};
+            size_t border_pixels{};
+            size_t glyph_pixels{};
+            for (int y = box.top; y < box.bottom; ++y)
+            {
+                for (int x = box.left; x < box.right; ++x)
+                {
+                    const auto rgb = canvas.pixels()[static_cast<size_t>(y) * canvas.width() + x] & 0x00ffffffu;
+                    if (rgb == expected_fill)
+                        ++fill_pixels;
+                    else if (rgb == border_rgb)
+                        ++border_pixels;
+                    else if (rgb != 0u)
+                        ++glyph_pixels;
+                }
+            }
+            require(fill_pixels > 1000, "Painted selector shortcut pill is missing its background fill.");
+            require(border_pixels > 100, "Painted selector shortcut pill is missing its border.");
+            require(glyph_pixels > 50, "Painted selector shortcut pill did not draw text glyphs.");
+        }
+    }
+    DeleteObject(font);
+}
 } // namespace
 int main()
 {
@@ -529,6 +634,7 @@ int main()
         geometry();
         pixels();
         dimming();
+        selector_hints();
         editor_engine();
         editor_markup();
         // Make sure each capture buffer releases its bitmap and device context.

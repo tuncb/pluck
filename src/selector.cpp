@@ -352,13 +352,7 @@ class Selector
     }
     const wchar_t* shortcut_text() const noexcept
     {
-        if (window_mode_)
-        {
-            return edit_mode_ ? L"Tab for area  \u00b7  E for Edit Off  \u00b7  F2 for settings"
-                              : L"Tab for area  \u00b7  E for Edit  \u00b7  F2 for settings";
-        }
-        return edit_mode_ ? L"Tab for window  \u00b7  E for Edit Off  \u00b7  F2 for settings"
-                          : L"Tab for window  \u00b7  E for Edit  \u00b7  F2 for settings";
+        return selector_shortcut_text(window_mode_, edit_mode_);
     }
     void warm_shortcut_font() noexcept
     {
@@ -384,7 +378,7 @@ class Selector
     }
     void update_shortcut_rect()
     {
-        if (IsRectEmpty(&shortcut_monitor_work_))
+        if (!has_area(shortcut_monitor_work_))
             return;
         const auto dc = GetDC(window_);
         const auto old = SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
@@ -393,15 +387,7 @@ class Selector
         GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &size);
         SelectObject(dc, old);
         ReleaseDC(window_, dc);
-        const auto margin = MulDiv(20, shortcut_dpi_, 96);
-        const auto padding = MulDiv(12, shortcut_dpi_, 96);
-        const auto width = std::min(size.cx + 2 * padding,
-                                    shortcut_monitor_work_.right - shortcut_monitor_work_.left - 2 * margin);
-        const auto height = size.cy + MulDiv(16, shortcut_dpi_, 96);
-        const auto left = shortcut_monitor_work_.left +
-                          (shortcut_monitor_work_.right - shortcut_monitor_work_.left - width) / 2;
-        shortcut_rect_ = {left - bounds_.left, shortcut_monitor_work_.bottom - margin - height - bounds_.top,
-                          left + width - bounds_.left, shortcut_monitor_work_.bottom - margin - bounds_.top};
+        shortcut_rect_ = selector_shortcut_rect(shortcut_monitor_work_, bounds_, size, shortcut_dpi_);
     }
     void prepare_shortcut_hint()
     {
@@ -426,23 +412,10 @@ class Selector
     }
     void paint_shortcut_hint(HDC dc)
     {
-        if (dragging_ || clicking_window_ || copying_ || closing_ || hint_ || IsRectEmpty(&shortcut_rect_))
+        if (!selector_shortcut_visible(dragging_, clicking_window_, copying_, closing_, hint_ != nullptr,
+                                       shortcut_rect_))
             return;
-        const auto old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
-        const auto old_pen = SelectObject(dc, GetStockObject(DC_PEN));
-        const auto old_font =
-            SelectObject(dc, shortcut_font_ ? shortcut_font_ : GetStockObject(DEFAULT_GUI_FONT));
-        SetDCBrushColor(dc, edit_mode_ ? RGB(119, 244, 213) : RGB(18, 38, 32));
-        SetDCPenColor(dc, RGB(55, 184, 173));
-        RoundRect(dc, shortcut_rect_.left, shortcut_rect_.top, shortcut_rect_.right, shortcut_rect_.bottom, 8,
-                  8);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, edit_mode_ ? RGB(8, 42, 36) : RGB(208, 255, 241));
-        auto text = shortcut_rect_;
-        DrawTextW(dc, shortcut_text(), -1, &text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
-        SelectObject(dc, old_font);
-        SelectObject(dc, old_pen);
-        SelectObject(dc, old_brush);
+        paint_selector_shortcut_pill(dc, shortcut_rect_, shortcut_font_, window_mode_, edit_mode_);
     }
     void toggle_edit_mode()
     {
@@ -585,8 +558,7 @@ class Selector
             KillTimer(window_, 1);
             pending_.reset();
             copying_ = false;
-            hint_ = window_mode_ ? L"Cannot copy. Click a window to try again, or press Esc to cancel."
-                                 : L"Cannot copy. Drag to try again, or press Esc to cancel.";
+            hint_ = selector_copy_error_text(window_mode_);
             start_ = end_ = {};
             if (window_mode_)
                 hovered_rect_ = hit_test_rects(window_rects_.data(), window_rects_.size(), cursor());
