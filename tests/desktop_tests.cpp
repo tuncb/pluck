@@ -78,6 +78,7 @@ class ClipboardBackup
 unsigned fixture_escape_presses{};
 unsigned fixture_settings_presses{};
 unsigned fixture_edit_presses{};
+unsigned fixture_tab_presses{};
 LRESULT CALLBACK pattern_proc(HWND window, UINT message, WPARAM w, LPARAM l)
 {
     if (message == WM_KEYDOWN && w == VK_ESCAPE)
@@ -93,6 +94,11 @@ LRESULT CALLBACK pattern_proc(HWND window, UINT message, WPARAM w, LPARAM l)
     if (message == WM_KEYDOWN && w == 'E')
     {
         ++fixture_edit_presses;
+        return 0;
+    }
+    if (message == WM_KEYDOWN && w == VK_TAB)
+    {
+        ++fixture_tab_presses;
         return 0;
     }
     if (message == WM_PAINT)
@@ -309,6 +315,14 @@ void edit_key()
     input[1].ki.dwFlags = KEYEVENTF_KEYUP;
     require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send E.");
 }
+void tab_key()
+{
+    INPUT input[2]{};
+    input[0].type = input[1].type = INPUT_KEYBOARD;
+    input[0].ki.wVk = input[1].ki.wVk = VK_TAB;
+    input[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    require(SendInput(2, input, sizeof(INPUT)) == 2, "Cannot send Tab.");
+}
 void send_vk(WORD key)
 {
     INPUT input[2]{};
@@ -471,6 +485,28 @@ void verify_image(HWND owner)
             require(pixel[0] == (red ? 64 : 192) && pixel[1] == (red ? 48 : 96) &&
                         pixel[2] == (red ? 224 : 32),
                     "Crop contains shifted, dimmed, or overlay pixels.");
+        }
+    GlobalUnlock(memory);
+    CloseClipboard();
+}
+void verify_window_image(HWND owner, int width, int height)
+{
+    open_clipboard(owner);
+    const auto memory = GetClipboardData(CF_DIB);
+    require(memory != nullptr, "No window bitmap remains after Pluck exits.");
+    auto* header = static_cast<BITMAPINFOHEADER*>(GlobalLock(memory));
+    require(header && header->biWidth == width && header->biHeight == height && header->biBitCount == 24,
+            "Window clipboard image dimensions differ.");
+    const size_t stride = (static_cast<size_t>(width) * 3 + 3) & ~size_t{3};
+    const auto* bytes = reinterpret_cast<const unsigned char*>(header + 1);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+        {
+            const auto* pixel = bytes + static_cast<size_t>(height - 1 - y) * stride + static_cast<size_t>(x) * 3;
+            const bool red = x >= 120 && x < 180 && y >= 100 && y < 140;
+            require(pixel[0] == (red ? 64 : 192) && pixel[1] == (red ? 48 : 96) &&
+                        pixel[2] == (red ? 224 : 32),
+                    "Window capture contains shifted, dimmed, or overlay pixels.");
         }
     GlobalUnlock(memory);
     CloseClipboard();
@@ -882,6 +918,95 @@ int wmain(int count, wchar_t** arguments)
         }
         std::puts("PASS: edit mode (E before/during drag, without focus, toggle off, concurrent capture, "
                   "markup draw/undo, Esc to select, Ctrl+C copy + retry, and window close).");
+        {
+            const int fixture_width = actual.right - actual.left;
+            const int fixture_height = actual.bottom - actual.top;
+            const POINT inside{actual.left + 20, actual.top + 20};
+
+            // Window mode direct copy: Tab switches to window selection, click copies exact window pixels.
+            const auto tab_presses = fixture_tab_presses;
+            SetForegroundWindow(fixture);
+            mouse(inside, 0);
+            {
+                Child child(arguments[1]);
+                tab_key();
+                pump(80);
+                DwmFlush();
+                const auto preview = pluck::capture_desktop(pluck::desktop_bounds());
+                save_bitmap(*preview, std::wstring(arguments[2]) + L"/window-mode.bmp");
+                mouse(inside, MOUSEEVENTF_LEFTDOWN);
+                mouse(inside, MOUSEEVENTF_LEFTUP);
+                child.exited();
+            }
+            require(fixture_tab_presses == tab_presses, "Tab reached the app behind capture.");
+            verify_window_image(fixture, fixture_width, fixture_height);
+
+            // Window mode + edit mode: Tab + E opens the editor with the full window image.
+            marker(fixture);
+            const auto sequence = GetClipboardSequenceNumber();
+            SetForegroundWindow(fixture);
+            mouse(inside, 0);
+            {
+                Child child(arguments[1]);
+                tab_key();
+                pump(50);
+                edit_key();
+                pump(50);
+                mouse(inside, MOUSEEVENTF_LEFTDOWN);
+                mouse(inside, MOUSEEVENTF_LEFTUP);
+                const auto editor = wait_for_editor(child.process.dwProcessId);
+                require(GetClipboardSequenceNumber() == sequence,
+                        "Window + edit mode changed the clipboard before Ctrl+C.");
+                SetForegroundWindow(editor);
+                pump(60);
+                ctrl_key('C');
+                const auto deadline = GetTickCount64() + 3000;
+                while (GetClipboardSequenceNumber() == sequence)
+                {
+                    require(GetTickCount64() < deadline, "Ctrl+C in window edit mode did not copy.");
+                    pump(10);
+                }
+                verify_window_image(fixture, fixture_width, fixture_height);
+                PostMessageW(editor, WM_CLOSE, 0, 0);
+                child.exited();
+            }
+
+            // Window mode without foreground focus: Tab does not leak and still selects the window.
+            const auto locked_tabs = fixture_tab_presses;
+            SetForegroundWindow(fixture);
+            mouse(inside, 0);
+            {
+                ForegroundLock lock;
+                Child child(arguments[1], false);
+                tab_key();
+                pump(60);
+                mouse(inside, MOUSEEVENTF_LEFTDOWN);
+                mouse(inside, MOUSEEVENTF_LEFTUP);
+                child.exited();
+            }
+            require(fixture_tab_presses == locked_tabs, "Tab without focus reached the app behind capture.");
+            verify_window_image(fixture, fixture_width, fixture_height);
+
+            // Tab during a rectangle drag cancels the drag, and pressing Tab again returns to rectangle mode.
+            SetForegroundWindow(fixture);
+            {
+                Child child(arguments[1]);
+                mouse(a, MOUSEEVENTF_LEFTDOWN);
+                mouse(b, 0);
+                tab_key();
+                pump(60);
+                mouse(b, MOUSEEVENTF_LEFTUP);
+                require(IsWindow(child.window), "Releasing after mid-drag Tab closed Pluck unexpectedly.");
+                tab_key();
+                pump(60);
+                mouse(a, MOUSEEVENTF_LEFTDOWN);
+                mouse(b, MOUSEEVENTF_LEFTUP);
+                child.exited();
+            }
+            verify_image(fixture);
+        }
+        std::puts("PASS: window mode (Tab toggle, exact window copy, window + edit mode, without focus, "
+                  "mid-drag switch, and return to rectangle mode).");
         std::vector<double> times;
         for (int direction = 0; direction < 4; ++direction)
         {

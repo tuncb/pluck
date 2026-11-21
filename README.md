@@ -3,16 +3,19 @@
 A small Windows screenshot app. A companion to [Yoink](https://github.com/tuncb/yoink).
 
 1. Open **Pluck.exe**.
-2. Drag a rectangle.
+2. Drag a rectangle, or press **Tab** to switch to **window mode** and click a window.
 3. Release the mouse button. The image is on the clipboard and Pluck exits.
 
 Paste the image into an app that accepts images. Press **Escape** or **right-click**
-to cancel. A click without a drag does not copy an image.
+to cancel. A click without a drag in rectangle mode (or a click on empty desktop in window
+mode) does not copy an image. Press **Tab** at any time to switch between rectangle mode
+and window mode.
 
 Press **E** before or during selection to turn on **edit mode**. The shortcut hint
 and selection border switch to mint while edit mode is active. Press **E** again to
-turn edit mode off. When you release the mouse button in edit mode, Pluck opens the
-captured image in **Pluck Editor** instead of copying it immediately. In the editor:
+turn edit mode off. Edit mode works in both rectangle mode and window mode. When you
+release the mouse button in edit mode, Pluck opens the captured image in **Pluck Editor**
+instead of copying it immediately. In the editor:
 
 - Draw movable vector markup from the top bar: **Select** (**V**), **Pen** (**P**), **Highlighter** (**H**), **Arrow** (**A**), **Rectangle** (**R**), **Oval** (**O**), **Line** (**L**), **Text** (**T**), **Step number** (**N**), **Redact / Pixelate** (**B**), and non-destructive **Crop** (**C**).
 - Hold **Shift** to draw straight pen or highlighter lines, 45° arrows or lines, or square and circular shapes.

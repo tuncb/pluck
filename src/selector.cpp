@@ -1,7 +1,10 @@
 #include "selector.h"
 #include "app_process.h"
+#include <dwmapi.h>
 #include <shellscalingapi.h>
+#include <cwchar>
 #include <exception>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -72,6 +75,86 @@ std::vector<RECT> collect_monitors(RECT bounds)
     if (collector.monitors.empty())
         collector.monitors.push_back({0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top});
     return collector.monitors;
+}
+
+std::vector<RECT> collect_windows(RECT bounds, HWND exclude_window)
+{
+    struct Collector
+    {
+        RECT bounds;
+        HWND exclude_window;
+        HWND shell_window;
+        HWND desktop_window;
+        std::vector<RECT> rects;
+    } collector{bounds, exclude_window, GetShellWindow(), GetDesktopWindow(), {}};
+    collector.rects.reserve(32);
+    EnumWindows(
+        [](HWND hwnd, LPARAM parameter) noexcept -> BOOL
+        {
+            auto& state = *reinterpret_cast<Collector*>(parameter);
+            if (!hwnd || hwnd == state.exclude_window || hwnd == state.shell_window ||
+                hwnd == state.desktop_window)
+                return TRUE;
+            if (!IsWindowVisible(hwnd) || IsIconic(hwnd))
+                return TRUE;
+            wchar_t class_name[64]{};
+            const int length = GetClassNameW(hwnd, class_name, static_cast<int>(std::size(class_name)));
+            if (length > 0 &&
+                (std::wcscmp(class_name, L"Progman") == 0 || std::wcscmp(class_name, L"WorkerW") == 0))
+                return TRUE;
+            const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+            if ((ex_style & WS_EX_LAYERED) != 0)
+            {
+                if ((ex_style & WS_EX_TRANSPARENT) != 0)
+                    return TRUE;
+                BYTE alpha = 255;
+                DWORD flags{};
+                if (GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &flags) && (flags & LWA_ALPHA) != 0 &&
+                    alpha == 0)
+                    return TRUE;
+            }
+            DWORD cloaked{};
+            if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) &&
+                cloaked != 0)
+                return TRUE;
+            RECT rect{};
+            if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rect, sizeof(rect))))
+            {
+                if (!GetWindowRect(hwnd, &rect))
+                    return TRUE;
+            }
+            RECT clip_rect{};
+            const RECT* clip = nullptr;
+            if (IsZoomed(hwnd))
+            {
+                MONITORINFO monitor{sizeof(monitor)};
+                if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor))
+                {
+                    const bool covers_monitor =
+                        rect.left <= monitor.rcMonitor.left && rect.top <= monitor.rcMonitor.top &&
+                        rect.right >= monitor.rcMonitor.right && rect.bottom >= monitor.rcMonitor.bottom;
+                    const auto style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+                    clip_rect = (covers_monitor && (style & WS_CAPTION) != WS_CAPTION) ? monitor.rcMonitor
+                                                                                       : monitor.rcWork;
+                    clip = &clip_rect;
+                }
+            }
+            const RECT clamped = clamp_window_rect(rect, state.bounds, clip);
+            if (has_area(clamped))
+            {
+                try
+                {
+                    state.rects.push_back(clamped);
+                }
+                catch (...)
+                {
+                    return FALSE;
+                }
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&collector));
+    return collector.rects;
 }
 
 class ThreadpoolWork
@@ -153,7 +236,9 @@ class Selector
                 wc.hInstance = instance;
                 wc.lpszClassName = SelectorClass;
                 wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
-                wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+                cross_cursor_ = LoadCursorW(nullptr, IDC_CROSS);
+                window_cursor_ = LoadCursorW(nullptr, IDC_HAND);
+                wc.hCursor = cross_cursor_;
                 if (!RegisterClassW(&wc))
                     throw std::runtime_error("Cannot register the selection window.");
                 window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SelectorClass,
@@ -233,6 +318,11 @@ class Selector
     inline static HWND escape_window_{};
     POINT start_{}, end_{};
     bool dragging_{}, closing_{}, copying_{};
+    bool window_mode_{}, windows_collected_{}, clicking_window_{};
+    std::vector<RECT> window_rects_;
+    RECT hovered_rect_{};
+    HCURSOR cross_cursor_{};
+    HCURSOR window_cursor_{};
     GlobalMemory pending_;
     ULONGLONG copy_started_{};
     const wchar_t* hint_{};
@@ -246,6 +336,7 @@ class Selector
     RECT edit_screen_rect_{};
     inline static bool settings_key_down_{};
     inline static bool edit_key_down_{};
+    inline static bool window_key_down_{};
 
     void cleanup() noexcept
     {
@@ -261,8 +352,13 @@ class Selector
     }
     const wchar_t* shortcut_text() const noexcept
     {
-        return edit_mode_ ? L"Edit mode on (E to cancel)  \u00b7  F2 for settings"
-                          : L"Press E for edit mode  \u00b7  F2 for settings";
+        if (window_mode_)
+        {
+            return edit_mode_ ? L"Window + edit mode (Tab / E)  \u00b7  F2 for settings"
+                              : L"Window mode (Tab for area)  \u00b7  E for edit  \u00b7  F2 for settings";
+        }
+        return edit_mode_ ? L"Edit mode on (E)  \u00b7  Tab for window  \u00b7  F2 for settings"
+                          : L"Tab for window  \u00b7  E for edit  \u00b7  F2 for settings";
     }
     void warm_shortcut_font() noexcept
     {
@@ -330,7 +426,7 @@ class Selector
     }
     void paint_shortcut_hint(HDC dc)
     {
-        if (dragging_ || copying_ || closing_ || hint_ || IsRectEmpty(&shortcut_rect_))
+        if (dragging_ || clicking_window_ || copying_ || closing_ || hint_ || IsRectEmpty(&shortcut_rect_))
             return;
         const auto old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
         const auto old_pen = SelectObject(dc, GetStockObject(DC_PEN));
@@ -355,18 +451,63 @@ class Selector
         edit_mode_ = !edit_mode_;
         const auto previous_pill = shortcut_rect_;
         update_shortcut_rect();
+        RECT changed{};
+        UnionRect(&changed, &previous_pill, &shortcut_rect_);
+        const auto selected = active_rect();
+        if (has_area(selected))
+        {
+            auto border = selected;
+            InflateRect(&border, 3, 3);
+            RECT total{};
+            UnionRect(&total, &changed, &border);
+            changed = total;
+        }
+        InvalidateRect(window_, &changed, FALSE);
+    }
+    void toggle_window_mode()
+    {
+        if (opening_settings_ || closing_ || copying_)
+            return;
+        const auto previous = active_rect();
+        const auto previous_pill = shortcut_rect_;
         if (dragging_)
         {
-            auto selected = area();
-            InflateRect(&selected, 2, 2);
-            InvalidateRect(window_, &selected, FALSE);
+            dragging_ = false;
+            start_ = end_ = {};
+            if (GetCapture() == window_)
+                ReleaseCapture();
+        }
+        if (clicking_window_)
+        {
+            clicking_window_ = false;
+            if (GetCapture() == window_)
+                ReleaseCapture();
+        }
+        window_mode_ = !window_mode_;
+        if (window_mode_)
+        {
+            if (!windows_collected_)
+            {
+                window_rects_ = collect_windows(bounds_, window_);
+                windows_collected_ = true;
+            }
+            hovered_rect_ = hit_test_rects(window_rects_.data(), window_rects_.size(), cursor());
         }
         else
         {
-            RECT changed{};
-            UnionRect(&changed, &previous_pill, &shortcut_rect_);
-            InvalidateRect(window_, &changed, FALSE);
+            hovered_rect_ = {};
         }
+        SetCursor(window_mode_ ? window_cursor_ : cross_cursor_);
+        update_shortcut_rect();
+        const auto current = active_rect();
+        RECT changed{};
+        UnionRect(&changed, &previous, &current);
+        InflateRect(&changed, 3, 3);
+        RECT pill_changed{};
+        UnionRect(&pill_changed, &previous_pill, &shortcut_rect_);
+        RECT total{};
+        UnionRect(&total, &changed, &pill_changed);
+        InvalidateRect(window_, &total, FALSE);
     }
     void open_settings()
     {
@@ -390,6 +531,10 @@ class Selector
     {
         return selection(start_, end_, {0, 0, bounds_.right - bounds_.left, bounds_.bottom - bounds_.top});
     }
+    RECT active_rect() const noexcept
+    {
+        return window_mode_ ? hovered_rect_ : area();
+    }
     POINT cursor() const noexcept
     {
         POINT point{};
@@ -402,6 +547,7 @@ class Selector
         escape_window_ = window_;
         settings_key_down_ = false;
         edit_key_down_ = false;
+        window_key_down_ = false;
         escape_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_procedure, GetModuleHandleW(nullptr), 0);
         if (!escape_hook_)
             escape_window_ = nullptr;
@@ -422,6 +568,7 @@ class Selector
             return;
         closing_ = true;
         dragging_ = false;
+        clicking_window_ = false;
         stop_escape_hook();
         KillTimer(window_, 1);
         if (GetCapture() == window_)
@@ -438,8 +585,11 @@ class Selector
             KillTimer(window_, 1);
             pending_.reset();
             copying_ = false;
-            hint_ = L"Cannot copy. Drag to try again, or press Esc to cancel.";
+            hint_ = window_mode_ ? L"Cannot copy. Click a window to try again, or press Esc to cancel."
+                                 : L"Cannot copy. Drag to try again, or press Esc to cancel.";
             start_ = end_ = {};
+            if (window_mode_)
+                hovered_rect_ = hit_test_rects(window_rects_.data(), window_rects_.size(), cursor());
             if (!start_escape_hook())
                 throw std::runtime_error("Cannot prepare the Escape key.");
             ShowWindow(window_, SW_SHOW);
@@ -449,10 +599,10 @@ class Selector
     }
     void redraw_selection(RECT previous)
     {
-        const auto selected = area();
+        const auto selected = active_rect();
         RECT changed{};
         UnionRect(&changed, &previous, &selected);
-        InflateRect(&changed, 2, 2);
+        InflateRect(&changed, 3, 3);
         InvalidateRect(window_, &changed, FALSE);
     }
     void open_editor(RECT selected)
@@ -483,7 +633,7 @@ class Selector
     {
         PAINTSTRUCT ps{};
         const auto dc = BeginPaint(window_, &ps);
-        const auto selected = area();
+        const auto selected = active_rect();
         const bool has_selection = has_area(selected);
         // Paint each part once. The selected pixels come from the original image.
         // The window stays opaque, including inside the selection rectangle.
@@ -507,19 +657,37 @@ class Selector
             RestoreDC(dc, saved);
             BitBlt(dc, selected.left, selected.top, selected.right - selected.left,
                    selected.bottom - selected.top, image_->dc(), selected.left, selected.top, SRCCOPY);
-            RECT border = selected;
-            InflateRect(&border, 1, 1);
-            if (edit_mode_)
+            if (window_mode_)
             {
+                // Draw an inset border so maximized and edge-aligned windows stay visible on all sides.
                 const auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
-                const auto previous_color = SetDCBrushColor(dc, RGB(119, 244, 213));
+                const auto previous_color =
+                    SetDCBrushColor(dc, edit_mode_ ? RGB(119, 244, 213) : RGB(255, 255, 255));
+                RECT border = selected;
                 FrameRect(dc, &border, brush);
-                InflateRect(&border, 1, 1);
-                FrameRect(dc, &border, brush);
+                if (border.right - border.left > 2 && border.bottom - border.top > 2)
+                {
+                    InflateRect(&border, -1, -1);
+                    FrameRect(dc, &border, brush);
+                }
                 SetDCBrushColor(dc, previous_color);
             }
             else
-                FrameRect(dc, &border, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            {
+                RECT border = selected;
+                InflateRect(&border, 1, 1);
+                if (edit_mode_)
+                {
+                    const auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
+                    const auto previous_color = SetDCBrushColor(dc, RGB(119, 244, 213));
+                    FrameRect(dc, &border, brush);
+                    InflateRect(&border, 1, 1);
+                    FrameRect(dc, &border, brush);
+                    SetDCBrushColor(dc, previous_color);
+                }
+                else
+                    FrameRect(dc, &border, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            }
         }
         if (hint_)
         {
@@ -555,6 +723,13 @@ class Selector
         {
         case WM_ERASEBKGND:
             return 1;
+        case WM_SETCURSOR:
+            if (LOWORD(l) == HTCLIENT)
+            {
+                SetCursor(window_mode_ ? window_cursor_ : cross_cursor_);
+                return TRUE;
+            }
+            break;
         case WM_PAINT:
             paint();
             return 0;
@@ -567,12 +742,19 @@ class Selector
                      (GetKeyState(VK_MENU) & 0x8000) == 0 && (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
                      (GetKeyState(VK_RWIN) & 0x8000) == 0)
                 toggle_edit_mode();
+            else if (w == VK_TAB && (l & (1 << 30)) == 0 && (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+                     (GetKeyState(VK_MENU) & 0x8000) == 0 && (GetKeyState(VK_LWIN) & 0x8000) == 0 &&
+                     (GetKeyState(VK_RWIN) & 0x8000) == 0)
+                toggle_window_mode();
             return 0;
         case OpenSettingsMessage:
             open_settings();
             return 0;
         case ToggleEditModeMessage:
             toggle_edit_mode();
+            return 0;
+        case ToggleWindowModeMessage:
+            toggle_window_mode();
             return 0;
         case WM_RBUTTONDOWN:
         case WM_CLOSE:
@@ -586,16 +768,46 @@ class Selector
         case WM_LBUTTONDOWN:
             if (!copying_)
             {
-                const auto previous = area();
-                dragging_ = true;
-                InvalidateRect(window_, &shortcut_rect_, FALSE);
-                start_ = end_ = cursor();
-                SetCapture(window_);
-                redraw_selection(previous);
+                if (window_mode_)
+                {
+                    const auto previous = hovered_rect_;
+                    hovered_rect_ = hit_test_rects(window_rects_.data(), window_rects_.size(), cursor());
+                    if (has_area(hovered_rect_))
+                    {
+                        clicking_window_ = true;
+                        InvalidateRect(window_, &shortcut_rect_, FALSE);
+                        SetCapture(window_);
+                        if (!EqualRect(&previous, &hovered_rect_))
+                            redraw_selection(previous);
+                    }
+                    else if (!EqualRect(&previous, &hovered_rect_))
+                    {
+                        redraw_selection(previous);
+                    }
+                }
+                else
+                {
+                    const auto previous = area();
+                    dragging_ = true;
+                    InvalidateRect(window_, &shortcut_rect_, FALSE);
+                    start_ = end_ = cursor();
+                    SetCapture(window_);
+                    redraw_selection(previous);
+                }
             }
             return 0;
         case WM_MOUSEMOVE:
-            if (dragging_)
+            if (window_mode_)
+            {
+                if (copying_ || closing_)
+                    return 0;
+                const auto previous = hovered_rect_;
+                hovered_rect_ = hit_test_rects(window_rects_.data(), window_rects_.size(), cursor());
+                if (EqualRect(&previous, &hovered_rect_))
+                    return 0;
+                redraw_selection(previous);
+            }
+            else if (dragging_)
             {
                 const auto previous = area();
                 end_ = cursor();
@@ -607,7 +819,29 @@ class Selector
             }
             return 0;
         case WM_LBUTTONUP:
-            if (dragging_)
+            if (window_mode_)
+            {
+                if (clicking_window_)
+                {
+                    clicking_window_ = false;
+                    if (GetCapture() == window_)
+                        ReleaseCapture();
+                    hovered_rect_ = hit_test_rects(window_rects_.data(), window_rects_.size(), cursor());
+                    if (has_area(hovered_rect_))
+                    {
+                        if (edit_mode_)
+                            open_editor(hovered_rect_);
+                        else
+                            capture_selection(hovered_rect_);
+                    }
+                    else
+                    {
+                        InvalidateRect(window_, &shortcut_rect_, FALSE);
+                        InvalidateRect(window_, nullptr, FALSE);
+                    }
+                }
+            }
+            else if (dragging_)
             {
                 end_ = cursor();
                 dragging_ = false;
@@ -636,6 +870,13 @@ class Selector
                 if (GetCapture() == window_)
                     ReleaseCapture();
             }
+            else if (clicking_window_)
+            {
+                clicking_window_ = false;
+                InvalidateRect(window_, &shortcut_rect_, FALSE);
+                if (GetCapture() == window_)
+                    ReleaseCapture();
+            }
             return 0;
         case WM_TIMER:
             if (w == 1 && pending_)
@@ -649,6 +890,29 @@ class Selector
     }
     static LRESULT CALLBACK keyboard_procedure(int code, WPARAM w, LPARAM l) noexcept
     {
+        if (code == HC_ACTION && reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == VK_TAB &&
+            escape_window_ && IsWindowVisible(escape_window_))
+        {
+            if (w == WM_KEYUP || w == WM_SYSKEYUP)
+            {
+                if (window_key_down_)
+                {
+                    window_key_down_ = false;
+                    return 1;
+                }
+                return CallNextHookEx(nullptr, code, w, l);
+            }
+            const bool modified = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+            if (!modified && (w == WM_KEYDOWN || w == WM_SYSKEYDOWN))
+            {
+                if (!window_key_down_)
+                    window_key_down_ = PostMessageW(escape_window_, ToggleWindowModeMessage, 0, 0) != FALSE;
+                return window_key_down_ ? 1 : CallNextHookEx(nullptr, code, w, l);
+            }
+        }
         if (code == HC_ACTION && reinterpret_cast<const KBDLLHOOKSTRUCT*>(l)->vkCode == 'E' &&
             escape_window_ && IsWindowVisible(escape_window_))
         {

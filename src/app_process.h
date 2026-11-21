@@ -12,6 +12,7 @@ inline constexpr wchar_t EditorMutex[] = L"Local\\Pluck.Editor";
 inline constexpr wchar_t MaintenanceMutex[] = L"Local\\Pluck.Maintenance";
 inline constexpr UINT OpenSettingsMessage = WM_APP + 1;
 inline constexpr UINT ToggleEditModeMessage = WM_APP + 2;
+inline constexpr UINT ToggleWindowModeMessage = WM_APP + 3;
 std::wstring executable_path();
 std::wstring quote_argument(std::wstring_view value);
 bool launch_settings();

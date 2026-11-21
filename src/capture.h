@@ -20,6 +20,38 @@ inline bool has_area(RECT rect) noexcept
 {
     return rect.right > rect.left && rect.bottom > rect.top;
 }
+inline RECT clamp_window_rect(RECT window_rect, RECT desktop_bounds, const RECT* clip_bounds = nullptr) noexcept
+{
+    RECT clipped = window_rect;
+    if (clip_bounds)
+    {
+        clipped.left = std::max(clipped.left, clip_bounds->left);
+        clipped.top = std::max(clipped.top, clip_bounds->top);
+        clipped.right = std::min(clipped.right, clip_bounds->right);
+        clipped.bottom = std::min(clipped.bottom, clip_bounds->bottom);
+    }
+    clipped.left = std::max(clipped.left, desktop_bounds.left);
+    clipped.top = std::max(clipped.top, desktop_bounds.top);
+    clipped.right = std::min(clipped.right, desktop_bounds.right);
+    clipped.bottom = std::min(clipped.bottom, desktop_bounds.bottom);
+    if (!has_area(clipped))
+        return {};
+    OffsetRect(&clipped, -desktop_bounds.left, -desktop_bounds.top);
+    return clipped;
+}
+inline RECT hit_test_rects(const RECT* rects, size_t count, POINT point) noexcept
+{
+    if (!rects)
+        return {};
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& rect = rects[i];
+        if (has_area(rect) && point.x >= rect.left && point.x < rect.right && point.y >= rect.top &&
+            point.y < rect.bottom)
+            return rect;
+    }
+    return {};
+}
 
 class Bitmap
 {

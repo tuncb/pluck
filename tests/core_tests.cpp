@@ -43,6 +43,30 @@ void geometry()
     check_rect({3, 4}, {4, 5}, bounds, {3, 4, 4, 5});
     require(!pluck::has_area(pluck::selection({1, 1}, {1, 10}, bounds)), "Zero width has area.");
     require(!pluck::has_area(pluck::selection({1, 1}, {10, 1}, bounds)), "Zero height has area.");
+
+    // Window clamping to virtual desktop and optional monitor work-area bounds, plus Z-order hit-testing.
+    const RECT desktop{-1920, -1080, 2560, 1440};
+    const auto shifted = pluck::clamp_window_rect({-100, -50, 300, 250}, desktop);
+    const RECT want_shifted{1820, 1030, 2220, 1330};
+    require(EqualRect(&shifted, &want_shifted), "Window rect desktop offset differs.");
+
+    const RECT work_area{0, 0, 2560, 1400};
+    const auto maximized = pluck::clamp_window_rect({-8, -8, 2568, 1408}, desktop, &work_area);
+    const RECT want_maximized{1920, 1080, 4480, 2480};
+    require(EqualRect(&maximized, &want_maximized), "Maximized window work-area clamping differs.");
+
+    const auto offscreen = pluck::clamp_window_rect({3000, 2000, 3400, 2300}, desktop);
+    require(!pluck::has_area(offscreen), "Off-screen window produced a non-empty rect.");
+
+    const RECT windows[3]{{100, 100, 300, 300}, {50, 50, 400, 400}, {500, 50, 700, 200}};
+    const auto front = pluck::hit_test_rects(windows, 3, {150, 150});
+    require(EqualRect(&front, &windows[0]), "Z-order hit-test did not pick the frontmost window.");
+    const auto back = pluck::hit_test_rects(windows, 3, {60, 60});
+    require(EqualRect(&back, &windows[1]), "Z-order hit-test did not fall through to the back window.");
+    const auto edge_exclusive = pluck::hit_test_rects(windows, 3, {300, 300});
+    require(EqualRect(&edge_exclusive, &windows[1]), "Right/bottom edges were not exclusive.");
+    const auto miss = pluck::hit_test_rects(windows, 3, {450, 450});
+    require(!pluck::has_area(miss), "Empty desktop hit returned a non-empty rect.");
 }
 void pixels()
 {
