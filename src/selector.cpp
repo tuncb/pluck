@@ -354,11 +354,11 @@ class Selector
     {
         if (window_mode_)
         {
-            return edit_mode_ ? L"Window + edit mode (Tab / E)  \u00b7  F2 for settings"
-                              : L"Window mode (Tab for area)  \u00b7  E for edit  \u00b7  F2 for settings";
+            return edit_mode_ ? L"Tab for area  \u00b7  E for Edit Off  \u00b7  F2 for settings"
+                              : L"Tab for area  \u00b7  E for Edit  \u00b7  F2 for settings";
         }
-        return edit_mode_ ? L"Edit mode on (E)  \u00b7  Tab for window  \u00b7  F2 for settings"
-                          : L"Tab for window  \u00b7  E for edit  \u00b7  F2 for settings";
+        return edit_mode_ ? L"Tab for window  \u00b7  E for Edit Off  \u00b7  F2 for settings"
+                          : L"Tab for window  \u00b7  E for Edit  \u00b7  F2 for settings";
     }
     void warm_shortcut_font() noexcept
     {
