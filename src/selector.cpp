@@ -1,72 +1,211 @@
 #include "selector.h"
 #include "app_process.h"
 #include <shellscalingapi.h>
+#include <exception>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace pluck
 {
 namespace
 {
+void disable_thread_ime() noexcept
+{
+    // user32 loads imm32 during process startup. Disable IME on the selector thread before
+    // window creation so Windows does not load Text Services Framework DLLs during ShowWindow.
+    const auto imm = GetModuleHandleW(L"imm32.dll");
+    if (!imm)
+        return;
+    using DisableImeFn = BOOL(WINAPI*)(DWORD);
+    if (const auto disable = reinterpret_cast<DisableImeFn>(GetProcAddress(imm, "ImmDisableIME")))
+        disable(0);
+}
+
+void disable_power_throttling() noexcept
+{
+    PROCESS_POWER_THROTTLING_STATE state{};
+    state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    state.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+}
+
+RECT init_selector_environment() noexcept
+{
+    disable_thread_ime();
+    disable_power_throttling();
+    return desktop_bounds();
+}
+
+std::vector<RECT> collect_monitors(RECT bounds)
+{
+    struct Collector
+    {
+        RECT bounds;
+        std::vector<RECT> monitors;
+    } collector{bounds, {}};
+    collector.monitors.reserve(4);
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR, HDC, LPRECT rect, LPARAM parameter) noexcept -> BOOL
+        {
+            if (!rect)
+                return TRUE;
+            auto& state = *reinterpret_cast<Collector*>(parameter);
+            RECT visible{};
+            if (IntersectRect(&visible, rect, &state.bounds))
+            {
+                OffsetRect(&visible, -state.bounds.left, -state.bounds.top);
+                try
+                {
+                    state.monitors.push_back(visible);
+                }
+                catch (...)
+                {
+                    return FALSE;
+                }
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&collector));
+    if (collector.monitors.empty())
+        collector.monitors.push_back({0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top});
+    return collector.monitors;
+}
+
+class ThreadpoolWork
+{
+  public:
+    ThreadpoolWork() = default;
+    ThreadpoolWork(PTP_WORK_CALLBACK callback, PVOID context) noexcept
+        : handle_(CreateThreadpoolWork(callback, context, nullptr))
+    {
+        if (handle_)
+            SubmitThreadpoolWork(handle_);
+    }
+    ~ThreadpoolWork()
+    {
+        wait();
+    }
+    ThreadpoolWork(const ThreadpoolWork&) = delete;
+    ThreadpoolWork& operator=(const ThreadpoolWork&) = delete;
+    bool active() const noexcept
+    {
+        return handle_ != nullptr;
+    }
+    void wait() noexcept
+    {
+        if (handle_)
+        {
+            WaitForThreadpoolWorkCallbacks(handle_, FALSE);
+            CloseThreadpoolWork(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+  private:
+    PTP_WORK handle_{};
+};
+
 class Selector
 {
   public:
     explicit Selector(HINSTANCE instance)
-        : bounds_(desktop_bounds()), image_(capture_desktop(bounds_)),
+        : bounds_(init_selector_environment()), monitors_(collect_monitors(bounds_)),
+          image_(std::make_unique<Bitmap>(bounds_.right - bounds_.left, bounds_.bottom - bounds_.top)),
           dimmed_(image_->width(), image_->height())
     {
-        // Save the desktop before a selection window can close menus or take focus.
-        // End a native menu's input loop before it can consume the first drag or
-        // release mouse capture after the selector has started that drag.
-        GUITHREADINFO foreground{sizeof(foreground)};
-        if (GetGUIThreadInfo(0, &foreground) && (foreground.flags & GUI_INMENUMODE) &&
-            foreground.hwndMenuOwner)
+        try
         {
-            DWORD_PTR ignored{};
-            SendMessageTimeoutW(foreground.hwndMenuOwner, WM_CANCELMODE, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK,
-                                200, &ignored);
+            // Fault destination pages in parallel before BitBlt writes the full desktop.
+            prefault_bitmap(*image_);
+
+            struct CaptureTask
+            {
+                Bitmap* image{};
+                RECT bounds{};
+                std::exception_ptr error;
+            } capture_task{image_.get(), bounds_, {}};
+            const auto run_capture = [](PTP_CALLBACK_INSTANCE, PVOID context, PTP_WORK) noexcept
+            {
+                auto& task = *static_cast<CaptureTask*>(context);
+                try
+                {
+                    capture_desktop_into(*task.image, task.bounds);
+                }
+                catch (...)
+                {
+                    task.error = std::current_exception();
+                }
+            };
+            const auto run_prefault = [](PTP_CALLBACK_INSTANCE, PVOID context, PTP_WORK) noexcept
+            { prefault_bitmap(*static_cast<Bitmap*>(context)); };
+
+            // Capture on a worker while the UI thread builds the hidden window and warms the font.
+            // A hidden popup window does not take focus, dismiss menus, or appear in the capture.
+            {
+                ThreadpoolWork capture_work(run_capture, &capture_task);
+                ThreadpoolWork prefault_dimmed(run_prefault, &dimmed_);
+
+                WNDCLASSW wc{};
+                wc.lpfnWndProc = procedure;
+                wc.hInstance = instance;
+                wc.lpszClassName = SelectorClass;
+                wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+                wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+                if (!RegisterClassW(&wc))
+                    throw std::runtime_error("Cannot register the selection window.");
+                window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SelectorClass,
+                                          L"Pluck - select area", WS_POPUP, bounds_.left, bounds_.top,
+                                          bounds_.right - bounds_.left, bounds_.bottom - bounds_.top,
+                                          nullptr, nullptr, instance, this);
+                if (!window_)
+                    throw std::runtime_error("Cannot open the selection window.");
+                prepare_shortcut_hint();
+
+                if (!capture_work.active())
+                    capture_desktop_into(*image_, bounds_);
+                if (!prefault_dimmed.active())
+                    prefault_bitmap(dimmed_);
+                capture_work.wait();
+                prefault_dimmed.wait();
+            }
+
+            if (capture_task.error)
+                std::rethrow_exception(capture_task.error);
+
+            // End a native menu's input loop after capture finishes so it cannot consume the first drag.
+            GUITHREADINFO foreground{sizeof(foreground)};
+            if (GetGUIThreadInfo(0, &foreground) && (foreground.flags & GUI_INMENUMODE) &&
+                foreground.hwndMenuOwner)
+            {
+                DWORD_PTR ignored{};
+                SendMessageTimeoutW(foreground.hwndMenuOwner, WM_CANCELMODE, 0, 0,
+                                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &ignored);
+            }
+
+            // Keep a dimmed copy so mouse moves need only bitmap copies during paint.
+            dim_bitmap(*image_, dimmed_, monitors_.data(), monitors_.size());
+
+            // A launcher can show the overlay without giving it keyboard focus.
+            if (!start_escape_hook())
+                throw std::runtime_error("Cannot prepare the Escape key.");
+
+            ShowWindow(window_, SW_SHOW);
+            SetForegroundWindow(window_);
+            SetFocus(window_);
+            UpdateWindow(window_);
         }
-        // Keep a dimmed copy so mouse moves need only bitmap copies during paint.
-        for (int i = 0; i < image_->width() * image_->height(); ++i)
+        catch (...)
         {
-            const auto pixel = image_->pixels()[i];
-            const auto red = ((pixel >> 16) & 255) * 135 / 255;
-            const auto green = ((pixel >> 8) & 255) * 135 / 255;
-            const auto blue = (pixel & 255) * 135 / 255;
-            dimmed_.pixels()[i] = (red << 16) | (green << 8) | blue;
+            cleanup();
+            throw;
         }
-        WNDCLASSW wc{};
-        wc.lpfnWndProc = procedure;
-        wc.hInstance = instance;
-        wc.lpszClassName = SelectorClass;
-        wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
-        wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
-        if (!RegisterClassW(&wc))
-            throw std::runtime_error("Cannot register the selection window.");
-        window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SelectorClass, L"Pluck - select area",
-                                  WS_POPUP, bounds_.left, bounds_.top, bounds_.right - bounds_.left,
-                                  bounds_.bottom - bounds_.top, nullptr, nullptr, instance, this);
-        if (!window_)
-            throw std::runtime_error("Cannot open the selection window.");
-        prepare_shortcut_hint();
-        // A launcher can show the overlay without giving it keyboard focus.
-        if (!start_escape_hook())
-        {
-            DestroyWindow(window_);
-            throw std::runtime_error("Cannot prepare the Escape key.");
-        }
-        ShowWindow(window_, SW_SHOW);
-        SetForegroundWindow(window_);
-        SetFocus(window_);
-        UpdateWindow(window_);
     }
     ~Selector()
     {
-        stop_escape_hook();
-        if (IsWindow(window_))
-            DestroyWindow(window_);
-        if (shortcut_font_)
-            DeleteObject(shortcut_font_);
+        cleanup();
     }
     int run()
     {
@@ -86,6 +225,7 @@ class Selector
 
   private:
     RECT bounds_{};
+    std::vector<RECT> monitors_;
     std::unique_ptr<Bitmap> image_;
     Bitmap dimmed_;
     HWND window_{};
@@ -107,10 +247,44 @@ class Selector
     inline static bool settings_key_down_{};
     inline static bool edit_key_down_{};
 
+    void cleanup() noexcept
+    {
+        stop_escape_hook();
+        if (window_ && IsWindow(window_))
+            DestroyWindow(window_);
+        window_ = nullptr;
+        if (shortcut_font_)
+        {
+            DeleteObject(shortcut_font_);
+            shortcut_font_ = nullptr;
+        }
+    }
     const wchar_t* shortcut_text() const noexcept
     {
         return edit_mode_ ? L"Edit mode on (E to cancel)  \u00b7  F2 for settings"
                           : L"Press E for edit mode  \u00b7  F2 for settings";
+    }
+    void warm_shortcut_font() noexcept
+    {
+        // Populate the Segoe UI ClearType glyph cache off-screen so WM_PAINT draws quickly.
+        if (!shortcut_font_)
+            return;
+        const auto dc = CreateCompatibleDC(nullptr);
+        if (!dc)
+            return;
+        const auto pixel = CreateCompatibleBitmap(dc, 1, 1);
+        if (pixel)
+        {
+            const auto old_bitmap = SelectObject(dc, pixel);
+            const auto old_font = SelectObject(dc, shortcut_font_);
+            RECT box{0, 0, shortcut_rect_.right - shortcut_rect_.left,
+                     shortcut_rect_.bottom - shortcut_rect_.top};
+            DrawTextW(dc, shortcut_text(), -1, &box, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+            SelectObject(dc, old_font);
+            SelectObject(dc, old_bitmap);
+            DeleteObject(pixel);
+        }
+        DeleteDC(dc);
     }
     void update_shortcut_rect()
     {
@@ -143,12 +317,16 @@ class Selector
             return;
         shortcut_monitor_work_ = monitor.rcWork;
         shortcut_dpi_ = GetDpiForWindow(window_);
-        UINT dpi_y{};
-        GetDpiForMonitor(display, MDT_EFFECTIVE_DPI, &shortcut_dpi_, &dpi_y);
+        if (monitors_.size() > 1)
+        {
+            UINT dpi_y{};
+            GetDpiForMonitor(display, MDT_EFFECTIVE_DPI, &shortcut_dpi_, &dpi_y);
+        }
         shortcut_font_ = CreateFontW(-MulDiv(14, shortcut_dpi_, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         update_shortcut_rect();
+        warm_shortcut_font();
     }
     void paint_shortcut_hint(HDC dc)
     {
@@ -306,16 +484,27 @@ class Selector
         PAINTSTRUCT ps{};
         const auto dc = BeginPaint(window_, &ps);
         const auto selected = area();
+        const bool has_selection = has_area(selected);
         // Paint each part once. The selected pixels come from the original image.
         // The window stays opaque, including inside the selection rectangle.
-        const auto saved = SaveDC(dc);
-        if (has_area(selected))
-            ExcludeClipRect(dc, selected.left, selected.top, selected.right, selected.bottom);
-        BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
-               ps.rcPaint.bottom - ps.rcPaint.top, dimmed_.dc(), ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
-        RestoreDC(dc, saved);
-        if (has_area(selected))
+        int saved{};
+        if (has_selection)
         {
+            saved = SaveDC(dc);
+            ExcludeClipRect(dc, selected.left, selected.top, selected.right, selected.bottom);
+        }
+        for (const auto& monitor : monitors_)
+        {
+            RECT part{};
+            if (IntersectRect(&part, &ps.rcPaint, &monitor))
+            {
+                BitBlt(dc, part.left, part.top, part.right - part.left, part.bottom - part.top,
+                       dimmed_.dc(), part.left, part.top, SRCCOPY);
+            }
+        }
+        if (has_selection)
+        {
+            RestoreDC(dc, saved);
             BitBlt(dc, selected.left, selected.top, selected.right - selected.left,
                    selected.bottom - selected.top, image_->dc(), selected.left, selected.top, SRCCOPY);
             RECT border = selected;

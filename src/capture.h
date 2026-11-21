@@ -63,7 +63,12 @@ struct GlobalDeleter
 using GlobalMemory = std::unique_ptr<void, GlobalDeleter>;
 
 RECT desktop_bounds() noexcept;
+void prefault_bitmap(Bitmap& image) noexcept;
+void capture_desktop_into(Bitmap& image, RECT bounds);
 std::unique_ptr<Bitmap> capture_desktop(RECT bounds);
+void dim_pixels(const std::uint32_t* source, std::uint32_t* destination, size_t count) noexcept;
+void dim_bitmap(const Bitmap& source, Bitmap& destination, const RECT* regions = nullptr,
+                size_t region_count = 0) noexcept;
 std::unique_ptr<Bitmap> crop_bitmap(const Bitmap& source, RECT crop);
 GlobalMemory make_clipboard_dib(const Bitmap& source, RECT crop);
 enum class CopyResult

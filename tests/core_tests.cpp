@@ -89,6 +89,68 @@ void pixels()
     require(pluck::copy_to_clipboard(nullptr, empty) == pluck::CopyResult::Failed,
             "Invalid clipboard owner was accepted.");
 }
+void dimming()
+{
+    const auto expected_pixel = [](std::uint32_t pixel) noexcept -> std::uint32_t
+    {
+        const auto red = ((pixel >> 16) & 255u) * 135u / 255u;
+        const auto green = ((pixel >> 8) & 255u) * 135u / 255u;
+        const auto blue = (pixel & 255u) * 135u / 255u;
+        return (red << 16) | (green << 8) | blue;
+    };
+
+    // Check every 8-bit channel value across aligned and unaligned start offsets and lengths.
+    std::vector<std::uint32_t> source(260);
+    std::vector<std::uint32_t> destination(260, 0xdeadbeefu);
+    for (std::uint32_t i = 0; i < 256; ++i)
+        source[i] = 0xff000000u | (i << 16) | ((255u - i) << 8) | ((i * 37u) & 255u);
+    for (size_t offset = 0; offset < 4; ++offset)
+    {
+        for (size_t length : {size_t{1}, size_t{2}, size_t{3}, size_t{4}, size_t{5}, size_t{15},
+                              size_t{256} - offset})
+        {
+            std::fill(destination.begin(), destination.end(), 0xdeadbeefu);
+            pluck::dim_pixels(source.data() + offset, destination.data() + offset, length);
+            for (size_t i = 0; i < length; ++i)
+            {
+                require(destination[offset + i] == expected_pixel(source[offset + i]),
+                        "SIMD dimmed pixel differs from exact integer dimming.");
+            }
+            if (offset > 0)
+                require(destination[offset - 1] == 0xdeadbeefu, "dim_pixels wrote before range.");
+            require(destination[offset + length] == 0xdeadbeefu, "dim_pixels wrote past range.");
+        }
+    }
+
+    // Check multi-region dimming leaves dead-void regions untouched and matches exact pixels.
+    pluck::Bitmap full(1024, 600);
+    pluck::Bitmap dimmed(1024, 600);
+    pluck::prefault_bitmap(full);
+    pluck::prefault_bitmap(dimmed);
+    for (int y = 0; y < 600; ++y)
+        for (int x = 0; x < 1024; ++x)
+            full.pixels()[static_cast<size_t>(y) * 1024 + x] =
+                0xff000000u | (static_cast<std::uint32_t>(y & 255) << 16) |
+                (static_cast<std::uint32_t>(x & 255) << 8) | static_cast<std::uint32_t>((x + y) & 255);
+    const RECT regions[2]{{0, 0, 600, 600}, {600, 123, 1024, 590}};
+    pluck::dim_bitmap(full, dimmed, regions, 2);
+    for (int y = 0; y < 600; ++y)
+        for (int x = 0; x < 1024; ++x)
+        {
+            const bool inside = (x < 600) || (x >= 600 && y >= 123 && y < 590);
+            const auto actual = dimmed.pixels()[static_cast<size_t>(y) * 1024 + x];
+            const auto want = inside ? expected_pixel(full.pixels()[static_cast<size_t>(y) * 1024 + x]) : 0u;
+            require(actual == want, "Multi-region dim_bitmap pixel differs.");
+        }
+
+    // Check full-bitmap parallel dimming path (>= 512K pixels).
+    pluck::dim_bitmap(full, dimmed);
+    for (size_t i = 0; i < static_cast<size_t>(1024) * 600; i += 97)
+    {
+        require(dimmed.pixels()[i] == expected_pixel(full.pixels()[i]),
+                "Full parallel dim_bitmap pixel differs.");
+    }
+}
 void editor_engine()
 {
     pluck::Bitmap source(6, 5);
@@ -199,6 +261,7 @@ int main()
     {
         geometry();
         pixels();
+        dimming();
         editor_engine();
         // Make sure each capture buffer releases its bitmap and device context.
         const auto before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);

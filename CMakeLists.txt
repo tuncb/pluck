@@ -30,7 +30,7 @@ target_include_directories(pluck_core PUBLIC src)
 target_compile_definitions(pluck_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
     _WIN32_WINNT=0x0A00 PLUCK_VERSION="${PROJECT_VERSION}")
 target_compile_options(pluck_core PUBLIC /utf-8 /EHsc /permissive- /W4 /WX /Zc:inline)
-target_link_libraries(pluck_core PUBLIC user32 gdi32)
+target_link_libraries(pluck_core PUBLIC kernel32 user32 gdi32)
 add_library(pluck_editor_core STATIC src/editor_core.cpp)
 target_link_libraries(pluck_editor_core PUBLIC pluck_core windowscodecs ole32 shell32)
 set(PLUCK_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/Pluck.ico")
@@ -44,14 +44,16 @@ target_compile_definitions(pluck_management PRIVATE WINRT_LEAN_AND_MEAN)
 add_executable(Pluck WIN32 src/main.cpp src/selector.cpp src/editor.cpp src/settings.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.rc"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
-target_link_libraries(Pluck PRIVATE pluck_editor_core pluck_management dwmapi shcore d2d1 delayimp)
-# The capture path does not initialize management or editor APIs. Load their DLLs on first use.
+target_link_libraries(Pluck PRIVATE pluck_core pluck_editor_core pluck_management dwmapi shcore d2d1 delayimp)
+# The capture path does not initialize management, shell scaling, or editor APIs. Load their DLLs on first use.
 target_link_options(Pluck PRIVATE /DELAYLOAD:shell32.dll /DELAYLOAD:ole32.dll /DELAYLOAD:advapi32.dll
-    /DELAYLOAD:bcrypt.dll /DELAYLOAD:version.dll /DELAYLOAD:winhttp.dll /DELAYLOAD:dwmapi.dll /DELAYLOAD:shcore.dll
+    /DELAYLOAD:bcrypt.dll /DELAYLOAD:version.dll /DELAYLOAD:winhttp.dll /DELAYLOAD:dwmapi.dll
+    /DELAYLOAD:api-ms-win-shcore-scaling-l1-1-1.dll /DELAYLOAD:api-ms-win-core-synch-l1-2-0.dll
     /DELAYLOAD:oleaut32.dll /DELAYLOAD:d2d1.dll /DELAYLOAD:api-ms-win-core-winrt-error-l1-1-1.dll
     /DELAYLOAD:api-ms-win-core-winrt-l1-1-0.dll)
 if(NOT PLUCK_SANITIZE)
     set_property(TARGET pluck_core pluck_editor_core pluck_management Pluck PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    target_link_options(Pluck PRIVATE $<$<CONFIG:Release>:/OPT:REF /OPT:ICF> /DEPENDENTLOADFLAG:0x800)
 endif()
 enable_testing()
 add_executable(pluck_tests tests/core_tests.cpp)

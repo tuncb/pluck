@@ -4,6 +4,7 @@
 #include "app_process.h"
 #include <cwchar>
 #include <exception>
+#include <thread>
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int)
 {
@@ -66,7 +67,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int)
     {
         try
         {
-            return pluck::run_editor(instance, std::move(selected.edit_image), selected.selection_screen_rect);
+            // Run the editor on a fresh thread so its save dialog keeps IME support.
+            int editor_exit_code = 1;
+            std::exception_ptr editor_error;
+            std::thread editor_thread(
+                [&, image = std::move(selected.edit_image)]() mutable
+                {
+                    try
+                    {
+                        editor_exit_code =
+                            pluck::run_editor(instance, std::move(image), selected.selection_screen_rect);
+                    }
+                    catch (...)
+                    {
+                        editor_error = std::current_exception();
+                    }
+                });
+            editor_thread.join();
+            if (editor_error)
+                std::rethrow_exception(editor_error);
+            return editor_exit_code;
         }
         catch (const std::exception& error)
         {
