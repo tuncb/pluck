@@ -2,6 +2,15 @@ Pluck changelog
 
 Notable changes by release tag.
 
+v0.4.0
+
+- Add window selection mode. Press Tab during capture to switch between area selection and window selection.
+- Add edit mode. Press E before or during selection to open the captured image in the native Pluck Editor instead of copying immediately.
+- Add vector markup tools in the editor: Select, Pen, Highlighter, Arrow, Rectangle, Oval, Line, Text, Step number, Redact or Pixelate, non-destructive Crop, zoom and pan, and undo and redo.
+- Save captures as PNG files or copy them to the clipboard from the editor while keeping the editor window open.
+- Update the bottom shortcut bar to show consistent Tab, E, and F2 hints across all selection states.
+- Speed up desktop capture and dimming during startup.
+
 v0.3.0
 
 - Add a Settings window. Press F2 during capture or run Pluck.exe --settings to open it.
