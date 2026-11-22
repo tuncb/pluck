@@ -32,16 +32,22 @@ try {
     foreach ($name in 'Pluck.lnk', 'Pluck Settings.lnk') {
         if (-not (Test-Path -LiteralPath (Join-Path $taskRoot "Start Menu/Pluck/$name"))) { throw "Missing shortcut: $name" }
     }
-    Write-Output 'PASS: per-user install, Windows registration, shortcuts, and settings restart in isolated folders'
+    $hotkeyOut = Join-Path $taskRoot 'hotkey.txt'
+    Invoke-Fixture $installed @('--write-hotkey', ('"' + $hotkeyOut + '"'))
+    if ((Get-Content -LiteralPath $hotkeyOut -Raw).Trim() -ne '635') { throw "Default launch hotkey was not Ctrl+F12 (635): $(Get-Content -LiteralPath $hotkeyOut -Raw)" }
+    Write-Output 'PASS: per-user install, Windows registration, default Ctrl+F12 shortcut, and settings restart in isolated folders'
     $keep = Join-Path (Split-Path -Parent $installed) 'keep.txt'
     Set-Content -LiteralPath $keep 'Retain user data.'
     Invoke-Fixture $installed @('--uninstall')
     Wait-For { -not (Test-Path -LiteralPath $uninstallKey) }
     if ((Test-Path -LiteralPath $installed) -or -not (Test-Path -LiteralPath $keep)) { throw 'Uninstall removed user data or left the app.' }
-    Write-Output 'PASS: uninstall removes the app and registration and retains unknown files'
+    if (Test-Path -LiteralPath (Join-Path $registryRoot 'Software/Pluck')) { throw 'Uninstall left the Pluck settings registry key.' }
+    Write-Output 'PASS: uninstall removes the app, shortcut settings, and registration and retains unknown files'
     Remove-Item -LiteralPath $marker
     Invoke-Fixture $Executable @('--install')
     Wait-For { Test-Path -LiteralPath $marker }
+    # Set a custom Ctrl+Alt+P shortcut (0x0650 = 1616) and confirm update preserves it.
+    Invoke-Fixture $installed @('--set-hotkey', '1616')
     $incoming = Join-Path $taskRoot 'next.exe'
     Invoke-Fixture $Executable @('--make-update', ('"' + $incoming + '"'))
     $before = (Get-FileHash -LiteralPath $installed).Hash
@@ -70,7 +76,9 @@ try {
     $expected = [Diagnostics.FileVersionInfo]::GetVersionInfo($incoming)
     $expectedVersion = "$($expected.ProductMajorPart).$($expected.ProductMinorPart).$($expected.ProductBuildPart)"
     if ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -ne $expectedVersion) { throw 'The Windows version was not updated.' }
-    Write-Output 'PASS: invalid SHA-256 is rejected; update waits for capture and editor, replaces the app, and reopens settings'
+    Invoke-Fixture $installed @('--write-hotkey', ('"' + $hotkeyOut + '"'))
+    if ((Get-Content -LiteralPath $hotkeyOut -Raw).Trim() -ne '1616') { throw "Update did not preserve custom launch hotkey: $(Get-Content -LiteralPath $hotkeyOut -Raw)" }
+    Write-Output 'PASS: invalid SHA-256 is rejected; update waits for capture and editor, replaces the app, preserves the launch shortcut, and reopens settings'
 } finally {
     if ($captureGate) { $captureGate.Dispose() }
     if ($editorGate) { $editorGate.Dispose() }

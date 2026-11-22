@@ -87,6 +87,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             prepare_uninstall();
         else if (count == 2 && wcscmp(args[1], L"--settings") == 0)
             std::ofstream(root / L"settings-opened.txt") << utf8(pluck::executable_path());
+        else if (count == 3 && wcscmp(args[1], L"--set-hotkey") == 0)
+        {
+            const auto value = wcstoul(args[2], nullptr, 0);
+            if (value > 0xffff)
+                throw std::runtime_error("Invalid fixture hotkey.");
+            update_launch_hotkey(install_directory(), shortcut_directory(), static_cast<WORD>(value));
+        }
+        else if (count == 3 && wcscmp(args[1], L"--write-hotkey") == 0)
+        {
+            const auto value = read_shortcut_hotkey(shortcut_directory() / L"Pluck.lnk");
+            std::ofstream(args[2]) << (value ? std::to_string(*value) : std::string("missing"));
+        }
         else if (count == 3 && wcscmp(args[1], L"--make-update") == 0)
             make_update(args[2]);
         else if ((count == 3 || count == 4) && wcscmp(args[1], L"--stage-update") == 0)

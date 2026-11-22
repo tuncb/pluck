@@ -66,6 +66,30 @@ void metadata()
     auto** values = CommandLineToArgvW(command.c_str(), &count);
     require(values && count == 2 && argument == values[1], "Windows argument quoting failed.");
     LocalFree(values);
+    require(DefaultLaunchHotkey == MAKEWORD(VK_F12, HotkeyControl), "Default launch shortcut differs.");
+    require(is_valid_launch_hotkey(0) && is_valid_launch_hotkey(DefaultLaunchHotkey),
+            "Default or empty shortcut was rejected.");
+    require(format_launch_hotkey(0) == L"None" && format_launch_hotkey(DefaultLaunchHotkey) == L"Ctrl + F12",
+            "Shortcut formatting differs.");
+    const auto ctrl_alt_p = validate_launch_hotkey('P', true, true, false, false);
+    require(ctrl_alt_p.valid && ctrl_alt_p.hotkey == MAKEWORD('P', HotkeyControl | HotkeyAlt) &&
+                format_launch_hotkey(ctrl_alt_p.hotkey) == L"Ctrl + Alt + P",
+            "Ctrl + Alt + P validation failed.");
+    const auto shift_num5 = validate_launch_hotkey(VK_NUMPAD5, false, false, true, false);
+    require(shift_num5.valid && format_launch_hotkey(shift_num5.hotkey) == L"Shift + Num 5",
+            "Numpad shortcut validation failed.");
+    const auto ctrl_div = validate_launch_hotkey(VK_DIVIDE, true, false, false, false, true);
+    require(ctrl_div.valid && (HIBYTE(ctrl_div.hotkey) & HotkeyExtended) != 0 &&
+                format_launch_hotkey(ctrl_div.hotkey) == L"Ctrl + Num /",
+            "Extended numpad shortcut validation failed.");
+    require(!validate_launch_hotkey(VK_F12, false, false, false, false).valid, "Bare F12 was accepted.");
+    require(!validate_launch_hotkey('P', true, false, false, false).valid,
+            "Single-modifier letter was accepted.");
+    require(!validate_launch_hotkey(VK_F12, true, false, false, true).valid, "Win modifier was accepted.");
+    require(!validate_launch_hotkey(VK_SNAPSHOT, true, true, false, false).valid,
+            "Print Screen was accepted.");
+    require(!validate_launch_hotkey(VK_ESCAPE, true, true, false, false).valid, "Escape was accepted.");
+    require(!is_valid_launch_hotkey(MAKEWORD(VK_F12, 0x20)), "Unknown hotkey modifier bits were accepted.");
 }
 void files(const fs::path& root, const fs::path& application)
 {
@@ -109,11 +133,56 @@ void files(const fs::path& root, const fs::path& application)
                     (shortcuts / (settings ? L"Pluck Settings.lnk" : L"Pluck.lnk")).c_str(), STGM_READ)),
                 "Shortcut was not created.");
         wchar_t args[256]{}, path[32768]{};
+        WORD hotkey{};
         require(SUCCEEDED(link->GetArguments(args, 256)) &&
-                    SUCCEEDED(link->GetPath(path, 32768, nullptr, SLGP_RAWPATH)),
+                    SUCCEEDED(link->GetPath(path, 32768, nullptr, SLGP_RAWPATH)) &&
+                    SUCCEEDED(link->GetHotkey(&hotkey)),
                 "Cannot inspect shortcut.");
         require(same_path(path, target) && std::wstring(args) == (settings ? L"--settings" : L""),
                 "Shortcut mode differs.");
+        require(hotkey == (settings ? 0 : DefaultLaunchHotkey), "Default shortcut hotkey differs.");
+    }
+    require(read_shortcut_hotkey(shortcuts / L"Pluck.lnk") == DefaultLaunchHotkey,
+            "Could not read Pluck.lnk hotkey.");
+    rejects([&] { create_shortcuts(root, shortcuts, MAKEWORD(VK_F12, 0)); });
+    create_shortcuts(root, shortcuts, 0);
+    require(read_shortcut_hotkey(shortcuts / L"Pluck.lnk") == 0, "Cleared hotkey was not written.");
+    const auto custom = MAKEWORD('P', HotkeyControl | HotkeyAlt);
+    create_shortcuts(root, shortcuts, custom);
+    require(read_shortcut_hotkey(shortcuts / L"Pluck.lnk") == custom, "Custom hotkey was not written.");
+    require(read_shortcut_hotkey(shortcuts / L"Pluck Settings.lnk") == 0,
+            "Settings shortcut must not receive a hotkey.");
+    {
+        const auto reg_key = L"Software\\Pluck.Tests\\" + root.filename().wstring();
+        HKEY hive{};
+        require(RegCreateKeyExW(HKEY_CURRENT_USER, reg_key.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr,
+                                &hive, nullptr) == ERROR_SUCCESS &&
+                    RegOverridePredefKey(HKEY_CURRENT_USER, hive) == ERROR_SUCCESS,
+                "Cannot isolate test registry.");
+        struct RegistryCleanup
+        {
+            HKEY hive;
+            std::wstring key;
+            ~RegistryCleanup()
+            {
+                RegOverridePredefKey(HKEY_CURRENT_USER, nullptr);
+                if (hive)
+                    RegCloseKey(hive);
+                RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+            }
+        } cleanup{hive, reg_key};
+        update_launch_hotkey(root, shortcuts, custom);
+        require(read_shortcut_hotkey(shortcuts / L"Pluck.lnk") == custom &&
+                    read_saved_launch_hotkey() == custom,
+                "update_launch_hotkey did not save custom shortcut.");
+        fs::remove(shortcuts / L"Pluck.lnk");
+        require(effective_launch_hotkey(shortcuts) == custom,
+                "effective_launch_hotkey did not fall back to saved setting.");
+        update_launch_hotkey(root, shortcuts, 0);
+        require(read_shortcut_hotkey(shortcuts / L"Pluck.lnk") == 0 && read_saved_launch_hotkey() == 0 &&
+                    effective_launch_hotkey(shortcuts) == 0,
+                "update_launch_hotkey did not clear shortcut.");
+        rejects([&] { update_launch_hotkey(root, shortcuts, MAKEWORD('P', HotkeyControl)); });
     }
 }
 } // namespace

@@ -42,6 +42,14 @@ Select **Install Pluck** to install for the current Windows user in
 **Pluck** starts capture; **Pluck Settings** opens settings. The original portable
 copy is retained. Installation does not require administrator rights.
 
+After installation, use **Launch shortcut** in Settings to set, reset, or clear
+the keyboard shortcut on **Pluck.lnk**. The default is **Ctrl+F12**. Windows
+Explorer handles this shortcut while Pluck is closed, so no background process
+stays open. Supported keys use **Ctrl**, **Alt**, or **Shift** with **F1–F24**
+or numpad keys, or at least two modifiers with a letter or number. Updates and
+**Restore shortcuts** preserve the configured shortcut, and **Uninstall** clears
+it automatically.
+
 Select **Check for updates** to check the latest stable GitHub release. Checks
 run only on request. From the installed copy, select **Update** when a newer
 release is available. Pluck downloads the executable, checks its SHA-256 and

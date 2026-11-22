@@ -15,7 +15,84 @@ namespace pluck::management
 namespace
 {
 constexpr wchar_t UninstallKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Pluck";
+constexpr wchar_t SettingsKey[] = L"Software\\Pluck";
+constexpr wchar_t LaunchHotkeyValue[] = L"LaunchHotkey";
 constexpr wchar_t OperationMutex[] = L"Local\\Pluck.InstallOperation";
+struct ComApartment
+{
+    bool active{};
+    ComApartment()
+    {
+        const auto result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(result) && result != RPC_E_CHANGED_MODE)
+            throw std::runtime_error("Cannot prepare Start menu shortcuts.");
+        active = SUCCEEDED(result);
+    }
+    ~ComApartment()
+    {
+        if (active)
+            CoUninitialize();
+    }
+    ComApartment(const ComApartment&) = delete;
+    ComApartment& operator=(const ComApartment&) = delete;
+};
+bool is_function_vk(UINT vk) noexcept
+{
+    return vk >= VK_F1 && vk <= VK_F24;
+}
+bool is_numpad_vk(UINT vk) noexcept
+{
+    return (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) || vk == VK_MULTIPLY || vk == VK_ADD ||
+           vk == VK_SUBTRACT || vk == VK_DECIMAL || vk == VK_DIVIDE;
+}
+bool is_alphanumeric_vk(UINT vk) noexcept
+{
+    return (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9');
+}
+int modifier_count(BYTE mods) noexcept
+{
+    return ((mods & HotkeyControl) ? 1 : 0) + ((mods & HotkeyAlt) ? 1 : 0) + ((mods & HotkeyShift) ? 1 : 0);
+}
+void notify_shortcut_change(LONG event_id, const fs::path& path) noexcept
+{
+    SHChangeNotify(event_id, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, path.c_str(), nullptr);
+}
+void clear_shortcut_hotkey(const fs::path& link_path) noexcept
+{
+    try
+    {
+        require_plain_path(link_path);
+        if (!fs::exists(link_path))
+            return;
+        ComApartment apartment;
+        Microsoft::WRL::ComPtr<IShellLinkW> link;
+        Microsoft::WRL::ComPtr<IPersistFile> persist;
+        if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) &&
+            SUCCEEDED(link.As(&persist)) && SUCCEEDED(persist->Load(link_path.c_str(), STGM_READWRITE)) &&
+            SUCCEEDED(link->SetHotkey(0)) && SUCCEEDED(persist->Save(link_path.c_str(), TRUE)))
+            notify_shortcut_change(SHCNE_UPDATEITEM, link_path);
+    }
+    catch (...)
+    {
+        // Best-effort cleanup before deleting a shortcut during uninstall.
+    }
+}
+void delete_saved_launch_hotkey() noexcept
+{
+    HKEY key{};
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, SettingsKey, 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &key) !=
+        ERROR_SUCCESS)
+        return;
+    RegDeleteValueW(key, LaunchHotkeyValue);
+    DWORD subkeys{}, values{};
+    const bool empty =
+        RegQueryInfoKeyW(key, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr, &values, nullptr, nullptr,
+                         nullptr, nullptr) == ERROR_SUCCESS &&
+        subkeys == 0 && values == 0;
+    RegCloseKey(key);
+    if (empty)
+        RegDeleteKeyW(HKEY_CURRENT_USER, SettingsKey);
+}
 fs::path known_folder(REFKNOWNFOLDERID id)
 {
 #ifdef PLUCK_TEST_ENVIRONMENT
@@ -341,36 +418,199 @@ void verify_executable(const fs::path& file, std::string_view expected_version)
         !length || wcscmp(name, L"Pluck") != 0)
         throw std::runtime_error("The update is not Pluck.");
 }
-void create_shortcuts(const fs::path& root, const fs::path& directory)
+bool is_valid_launch_hotkey(WORD hotkey) noexcept
 {
+    if (hotkey == 0)
+        return true;
+    const UINT vk = LOBYTE(hotkey);
+    const BYTE mods = HIBYTE(hotkey);
+    if ((mods & ~(HotkeyShift | HotkeyControl | HotkeyAlt | HotkeyExtended)) != 0)
+        return false;
+    const int count = modifier_count(mods);
+    if (is_function_vk(vk) || is_numpad_vk(vk))
+        return count >= 1;
+    if (is_alphanumeric_vk(vk))
+        return count >= 2;
+    return false;
+}
+HotkeyValidation validate_launch_hotkey(UINT vk, bool ctrl, bool alt, bool shift, bool win, bool extended)
+{
+    if (win)
+        return {false, 0, L"Windows shortcuts cannot use the Win key."};
+    if (vk == VK_SNAPSHOT)
+        return {false, 0, L"Windows shortcuts cannot use Print Screen."};
+    BYTE mods{};
+    if (shift)
+        mods |= HotkeyShift;
+    if (ctrl)
+        mods |= HotkeyControl;
+    if (alt)
+        mods |= HotkeyAlt;
+    if (extended && vk == VK_DIVIDE)
+        mods |= HotkeyExtended;
+    const int count = modifier_count(mods);
+    if (is_function_vk(vk) || is_numpad_vk(vk))
+    {
+        if (count < 1)
+            return {false, 0, L"Add Ctrl, Alt, or Shift with that key."};
+        return {true, MAKEWORD(static_cast<BYTE>(vk), mods), {}};
+    }
+    if (is_alphanumeric_vk(vk))
+    {
+        if (count < 2)
+            return {false, 0, L"Use at least two modifiers (such as Ctrl + Alt) with a letter or number."};
+        return {true, MAKEWORD(static_cast<BYTE>(vk), mods), {}};
+    }
+    return {false, 0, L"Use Ctrl, Alt, or Shift with F1-F24, or two modifiers with a letter or number."};
+}
+std::wstring format_launch_hotkey(WORD hotkey)
+{
+    if (hotkey == 0)
+        return L"None";
+    const UINT vk = LOBYTE(hotkey);
+    const BYTE mods = HIBYTE(hotkey);
+    std::wstring text;
+    const auto append = [&text](std::wstring_view part)
+    {
+        if (!text.empty())
+            text += L" + ";
+        text += part;
+    };
+    if (mods & HotkeyControl)
+        append(L"Ctrl");
+    if (mods & HotkeyAlt)
+        append(L"Alt");
+    if (mods & HotkeyShift)
+        append(L"Shift");
+    if (is_function_vk(vk))
+        append(L"F" + std::to_wstring(vk - VK_F1 + 1));
+    else if (vk >= 'A' && vk <= 'Z')
+        append(std::wstring(1, static_cast<wchar_t>(vk)));
+    else if (vk >= '0' && vk <= '9')
+        append(std::wstring(1, static_cast<wchar_t>(vk)));
+    else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)
+        append(L"Num " + std::to_wstring(vk - VK_NUMPAD0));
+    else if (vk == VK_MULTIPLY)
+        append(L"Num *");
+    else if (vk == VK_ADD)
+        append(L"Num +");
+    else if (vk == VK_SUBTRACT)
+        append(L"Num -");
+    else if (vk == VK_DECIMAL)
+        append(L"Num .");
+    else if (vk == VK_DIVIDE)
+        append(L"Num /");
+    else
+    {
+        const UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+        LONG lparam = static_cast<LONG>(scan << 16);
+        if (mods & HotkeyExtended)
+            lparam |= 1 << 24;
+        wchar_t name[64]{};
+        if (scan && GetKeyNameTextW(lparam, name, static_cast<int>(std::size(name))) > 0)
+            append(name);
+        else
+            append(L"Key " + std::to_wstring(vk));
+    }
+    return text;
+}
+std::optional<WORD> read_shortcut_hotkey(const fs::path& link_path)
+{
+    require_plain_path(link_path);
+    if (!fs::exists(link_path))
+        return std::nullopt;
+    ComApartment apartment;
+    Microsoft::WRL::ComPtr<IShellLinkW> link;
+    Microsoft::WRL::ComPtr<IPersistFile> persist;
+    WORD hotkey{};
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) ||
+        FAILED(link.As(&persist)) || FAILED(persist->Load(link_path.c_str(), STGM_READ)) ||
+        FAILED(link->GetHotkey(&hotkey)))
+        return std::nullopt;
+    return hotkey;
+}
+std::optional<WORD> read_saved_launch_hotkey()
+{
+    DWORD value{};
+    DWORD size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, SettingsKey, LaunchHotkeyValue, RRF_RT_REG_DWORD, nullptr, &value,
+                     &size) != ERROR_SUCCESS ||
+        value > 0xffff)
+        return std::nullopt;
+    const auto hotkey = static_cast<WORD>(value);
+    if (!is_valid_launch_hotkey(hotkey))
+        return std::nullopt;
+    return hotkey;
+}
+void write_saved_launch_hotkey(WORD hotkey)
+{
+    if (!is_valid_launch_hotkey(hotkey))
+        throw std::runtime_error("The launch shortcut is not supported by Windows.");
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, SettingsKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS)
+        throw std::runtime_error("Cannot save the launch shortcut setting.");
+    const DWORD value = hotkey;
+    const bool ok = RegSetValueExW(key, LaunchHotkeyValue, 0, REG_DWORD,
+                                   reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    if (!ok)
+        throw std::runtime_error("Cannot save the launch shortcut setting.");
+}
+WORD effective_launch_hotkey(const fs::path& directory)
+{
+    if (const auto from_link = read_shortcut_hotkey(directory / L"Pluck.lnk"))
+        return *from_link;
+    if (const auto saved = read_saved_launch_hotkey())
+        return *saved;
+    return DefaultLaunchHotkey;
+}
+void create_shortcuts(const fs::path& root, const fs::path& directory, WORD hotkey)
+{
+    if (!is_valid_launch_hotkey(hotkey))
+        throw std::runtime_error("The launch shortcut is not supported by Windows.");
     require_plain_path(directory);
     fs::create_directories(directory);
-    const auto result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (FAILED(result) && result != RPC_E_CHANGED_MODE)
-        throw std::runtime_error("Cannot prepare Start menu shortcuts.");
-    struct Apartment
-    {
-        bool active;
-        ~Apartment()
-        {
-            if (active)
-                CoUninitialize();
-        }
-    } apartment{SUCCEEDED(result)};
+    ComApartment apartment;
     for (const bool settings : {false, true})
     {
         const auto path = directory / (settings ? L"Pluck Settings.lnk" : L"Pluck.lnk");
         require_plain_path(path);
+        const bool existed = fs::exists(path);
         Microsoft::WRL::ComPtr<IShellLinkW> link;
         Microsoft::WRL::ComPtr<IPersistFile> persist;
         if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) ||
             FAILED(link->SetPath((root / L"Pluck.exe").c_str())) ||
             FAILED(link->SetArguments(settings ? L"--settings" : L"")) ||
             FAILED(link->SetWorkingDirectory(root.c_str())) ||
-            FAILED(link->SetIconLocation((root / L"Pluck.exe").c_str(), 0)) || FAILED(link.As(&persist)) ||
+            FAILED(link->SetIconLocation((root / L"Pluck.exe").c_str(), 0)) ||
+            FAILED(link->SetHotkey(settings ? 0 : hotkey)) || FAILED(link.As(&persist)) ||
             FAILED(persist->Save(path.c_str(), TRUE)))
             throw std::runtime_error("Cannot create Start menu shortcuts.");
+        notify_shortcut_change(existed ? SHCNE_UPDATEITEM : SHCNE_CREATE, path);
     }
+}
+void update_launch_hotkey(const fs::path& root, const fs::path& directory, WORD hotkey)
+{
+    if (!is_valid_launch_hotkey(hotkey))
+        throw std::runtime_error("The launch shortcut is not supported by Windows.");
+    const auto path = directory / L"Pluck.lnk";
+    require_plain_path(directory);
+    require_plain_path(path);
+    if (!fs::exists(path))
+        create_shortcuts(root, directory, hotkey);
+    else
+    {
+        ComApartment apartment;
+        Microsoft::WRL::ComPtr<IShellLinkW> link;
+        Microsoft::WRL::ComPtr<IPersistFile> persist;
+        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) ||
+            FAILED(link.As(&persist)) || FAILED(persist->Load(path.c_str(), STGM_READWRITE)) ||
+            FAILED(link->SetHotkey(hotkey)) || FAILED(persist->Save(path.c_str(), TRUE)))
+            throw std::runtime_error("Cannot update the Start menu shortcut.");
+        notify_shortcut_change(SHCNE_UPDATEITEM, path);
+    }
+    write_saved_launch_hotkey(hotkey);
 }
 void replace_executable(const fs::path& source, const fs::path& destination)
 {
@@ -542,14 +782,18 @@ int finish_job(const fs::path& job, DWORD parent)
         verify_executable(executable, target);
         fs::remove(executable);
         const auto shortcuts = shortcut_directory();
+        clear_shortcut_hotkey(shortcuts / L"Pluck.lnk");
         for (const auto name : {L"Pluck.lnk", L"Pluck Settings.lnk"})
         {
-            require_plain_path(shortcuts / name);
-            fs::remove(shortcuts / name);
+            const auto link = shortcuts / name;
+            require_plain_path(link);
+            if (fs::remove(link))
+                notify_shortcut_change(SHCNE_DELETE, link);
         }
         std::error_code ignored;
         fs::remove(shortcuts, ignored);
         fs::remove(root, ignored);
+        delete_saved_launch_hotkey();
         const auto removed = RegDeleteTreeW(HKEY_CURRENT_USER, UninstallKey);
         if (removed != ERROR_SUCCESS && removed != ERROR_FILE_NOT_FOUND)
             throw std::runtime_error(
@@ -561,9 +805,13 @@ int finish_job(const fs::path& job, DWORD parent)
             throw std::runtime_error("Pluck is already installed.");
         if (action == "update")
             verify_executable(executable, PLUCK_VERSION);
+        const auto shortcuts = shortcut_directory();
+        const WORD hotkey =
+            action == "update" ? effective_launch_hotkey(shortcuts) : DefaultLaunchHotkey;
         fs::create_directories(root);
         replace_executable(staged, executable);
-        create_shortcuts(root, shortcut_directory());
+        create_shortcuts(root, shortcuts, hotkey);
+        write_saved_launch_hotkey(hotkey);
         register_installation(root, target);
     }
     std::ofstream(job / L"done") << "complete\n";
